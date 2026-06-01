@@ -1,0 +1,51 @@
+{
+  "name": "smart-cat-studio-v1.7.7.7",
+  "private": true,
+  "version": "1.7.7.7",
+  "type": "module",
+  "scripts": {
+    "predev": "node scripts/ensure-vite.mjs",
+    "dev": "vite",
+    "dev:with-db": "concurrently \"npm run server\" \"npm run dev\"",
+    "server": "node server/index.mjs",
+    "build": "vite build",
+    "lint": "eslint .",
+    "preview": "vite preview",
+    "migrate:sqlite-to-pg": "node scripts/migrate-sqlite-to-pg.mjs",
+    "postinstall": "npm rebuild better-sqlite3",
+    "rebuild:native": "node scripts/stash-better-sqlite3-build.mjs && npm explore better-sqlite3 -- npm exec -- prebuild-install",
+    "rebuild:native:compile": "node scripts/stash-better-sqlite3-build.mjs && npm explore better-sqlite3 -- npm run build-release"
+  },
+  "dependencies": {
+    "@google/genai": "^1.34.0",
+    "@types/jszip": "^3.4.0",
+    "bcryptjs": "^3.0.2",
+    "better-sqlite3": "^11.10.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "idb": "8.0.0",
+    "jszip": "^3.10.1",
+    "jsonwebtoken": "^9.0.2",
+    "lucide-react": "^0.562.0",
+    "mammoth": "1.6.0",
+    "pg": "^8.16.0",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "react-window": "^2.2.5",
+    "xlsx": "0.18.5"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.14.0",
+    "@types/react-dom": "^19.2.3",
+    "@types/react-window": "^1.8.8",
+    "@vitejs/plugin-react": "^5.0.0",
+    "concurrently": "^9.1.2",
+    "eslint": "^10.3.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.6.0",
+    "typescript": "~5.8.2",
+    "typescript-eslint": "^8.59.2",
+    "vite": "^6.2.0"
+  }
+}
