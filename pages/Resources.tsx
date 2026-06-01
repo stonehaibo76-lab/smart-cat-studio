@@ -5,6 +5,7 @@ import { GrammarRuleBooksPanel, createEmptyGrammarRuleBook } from '../components
 import { RegexDictionaryPanel, createEmptyRegexDictionaryBook } from '../components/RegexDictionaryPanel';
 import * as XLSX from 'xlsx';
 import { SUPPORTED_LANGUAGES, formatResourceCreatedDateLabel } from '../constants';
+import { isCloudDeployment } from '../services/deploymentMode';
 
 interface ResourcesProps {
   termBases: TermBase[];
@@ -33,6 +34,7 @@ export const Resources: React.FC<ResourcesProps> = ({
   regexDictionaryBooks,
   onRegexDictionaryBooksChange
 }) => {
+  const cloud = isCloudDeployment();
   const [activeTab, setActiveTab] = useState<'tb' | 'tm' | 'gr' | 'rx'>('tb');
   const [selectedFileId, setSelectedFileId] = useState<string>('');
   const [searchTerm, setSearchTerm] = useState('');
@@ -658,9 +660,10 @@ export const Resources: React.FC<ResourcesProps> = ({
           <p className="text-slate-500 mt-1">维护您的核心翻译资产。</p>
           <p className="text-slate-500 text-sm mt-1 max-w-3xl leading-relaxed">
             术语库、记忆库、<strong className="text-slate-700">规则词典</strong>与<strong className="text-slate-700">正则表达式词典</strong>均在编辑后约 1
-            秒自动写入当前<strong className="text-slate-700">本地 SQLite</strong>（与项目挂载关系一并持久化）。须保持本地数据库服务可用（例如{' '}
-            <code className="text-xs bg-slate-100 px-1 rounded">npm run server</code> 或{' '}
-            <code className="text-xs bg-slate-100 px-1 rounded">npm run dev:with-db</code>）。
+            秒自动写入{cloud ? '云端数据库' : '本地 SQLite'}（与项目挂载关系一并持久化）。
+            {cloud
+              ? ' 数据按登录账号隔离，换设备登录同一账号即可继续编辑。'
+              : ' 须保持本地数据库服务可用（例如 npm run server 或 npm run dev:with-db）。'}
           </p>
         </div>
       </div>

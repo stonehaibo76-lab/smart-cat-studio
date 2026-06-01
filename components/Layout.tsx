@@ -4,6 +4,7 @@ import { Icons } from './ui/Icons';
 import { FavoriteUrl, Project } from '../types';
 import { APP_DISPLAY_VERSION } from '../constants';
 import { fetchLocalBackendHealth, type LocalBackendHealth } from '../services/localBackendClient';
+import { isCloudDeployment } from '../services/deploymentMode';
 import type { AuthUser } from '../services/authService';
 import { segmentIsEffectivelyConfirmed } from '../services/segmentEffectiveStatus';
 import { getProjectXliffExportCapabilities } from '../services/xliff/projectXliffDetect';
@@ -32,12 +33,13 @@ interface SidebarLocalDbFooterProps {
   reduceVisualEffects?: boolean;
 }
 
-function SidebarLocalDbFooter({
+function SidebarDataFooter({
   collapsed,
   health,
   onOpenSettings,
   reduceVisualEffects = false,
 }: SidebarLocalDbFooterProps) {
+  const cloud = isCloudDeployment();
   const connected = health?.ok === true;
   const main = health?.dbFileBytes ?? null;
   const wal = health?.walFileBytes ?? null;
@@ -45,15 +47,20 @@ function SidebarLocalDbFooter({
   const hasSize =
     connected &&
     health &&
+    !cloud &&
     (main != null || walBytes > 0);
   const totalBytes = hasSize ? (main ?? 0) + walBytes : null;
 
   const pathTitle = health?.dbPath?.trim() ?? '';
   const baseName = pathTitle ? sqlitePathBasename(pathTitle) : '';
 
-  const collapsedTitle = connected
-    ? `本地数据库已连接${pathTitle ? `\n${pathTitle}` : ''}${totalBytes != null ? `\n约 ${formatDataSize(totalBytes)}` : ''}${walBytes > 0 ? '\n（含 WAL 文件）' : ''}`
-    : '本地数据库服务未连接\n请启动本地后端（npm run dev:with-db 或 npm run server）';
+  const collapsedTitle = cloud
+    ? connected
+      ? '云端数据库已连接\nPostgreSQL · 按账号隔离存储'
+      : '云端 API 未连接\n请检查网络或稍后重试'
+    : connected
+      ? `本地数据库已连接${pathTitle ? `\n${pathTitle}` : ''}${totalBytes != null ? `\n约 ${formatDataSize(totalBytes)}` : ''}${walBytes > 0 ? '\n（含 WAL 文件）' : ''}`
+      : '本地数据库服务未连接\n请启动本地后端（npm run dev:with-db 或 npm run server）';
 
   if (collapsed) {
     return (
@@ -84,7 +91,9 @@ function SidebarLocalDbFooter({
         }`}
       >
         <div className="mb-2 flex items-start justify-between gap-2">
-          <p className="text-xs font-medium uppercase tracking-wider text-slate-400">本地数据库</p>
+          <p className="text-xs font-medium uppercase tracking-wider text-slate-400">
+            {cloud ? '云端数据库' : '本地数据库'}
+          </p>
           <span
             className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold ${
               connected ? 'bg-emerald-500/15 text-emerald-400' : 'bg-rose-500/15 text-rose-400'
@@ -94,28 +103,37 @@ function SidebarLocalDbFooter({
           </span>
         </div>
         {connected && health ? (
-          <>
-            <p className="text-sm font-semibold leading-snug text-slate-100">
-              {totalBytes != null ? (
-                <>
-                  约 {formatDataSize(totalBytes)}
-                  {walBytes > 0 ? (
-                    <span className="ml-1 text-xs font-normal text-slate-500">（含 WAL）</span>
-                  ) : null}
-                </>
-              ) : (
-                '—'
-              )}
-            </p>
-            {pathTitle ? (
-              <p className="mt-1 truncate text-xs text-slate-500" title={pathTitle}>
-                {baseName}
+          cloud ? (
+            <>
+              <p className="text-sm font-semibold leading-snug text-slate-100">PostgreSQL</p>
+              <p className="mt-1 text-xs text-slate-500">项目与资源按登录账号隔离存储</p>
+            </>
+          ) : (
+            <>
+              <p className="text-sm font-semibold leading-snug text-slate-100">
+                {totalBytes != null ? (
+                  <>
+                    约 {formatDataSize(totalBytes)}
+                    {walBytes > 0 ? (
+                      <span className="ml-1 text-xs font-normal text-slate-500">（含 WAL）</span>
+                    ) : null}
+                  </>
+                ) : (
+                  '—'
+                )}
               </p>
-            ) : null}
-          </>
+              {pathTitle ? (
+                <p className="mt-1 truncate text-xs text-slate-500" title={pathTitle}>
+                  {baseName}
+                </p>
+              ) : null}
+            </>
+          )
         ) : (
           <p className="text-xs leading-relaxed text-slate-500">
-            无法连接本地 SQLite 服务时应用无法持久化数据。请先启动后端，或在「系统设置 → 本地数据」查看说明。
+            {cloud
+              ? '无法连接云端 API 时应用无法读写数据。请检查网络连接，或稍后重试（免费托管可能需冷启动）。'
+              : '无法连接本地 SQLite 服务时应用无法持久化数据。请先启动后端，或在「系统设置 → 本地数据」查看说明。'}
           </p>
         )}
         <button
@@ -123,7 +141,7 @@ function SidebarLocalDbFooter({
           onClick={onOpenSettings}
           className="mt-2 text-xs font-medium text-blue-400 hover:text-blue-300"
         >
-          本地数据设置 →
+          {cloud ? '云端数据说明 →' : '本地数据设置 →'}
         </button>
       </div>
     </div>
@@ -389,7 +407,7 @@ export const Layout: React.FC<LayoutProps> = ({
           })}
         </nav>
 
-        <SidebarLocalDbFooter
+        <SidebarDataFooter
           collapsed={isSidebarCollapsed}
           health={localDbHealth}
           onOpenSettings={() => onNavigate('settings', { settingsPanel: 'localDb' })}

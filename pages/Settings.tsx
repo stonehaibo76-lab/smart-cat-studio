@@ -20,6 +20,7 @@ import {
   type LocalDataStoreInfo,
 } from '../services/localBackendClient';
 import { DEEPSEEK_MODEL_OPTIONS } from '../constants';
+import { isCloudDeployment, saveSettingsHint, savedToDatabaseMessage } from '../services/deploymentMode';
 
 export type SettingsPanelId =
   | 'ai'
@@ -137,7 +138,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
     capitalizeTargetFirstLetterZhOut, onUpdateCapitalizeTargetFirstLetterZhOut,
     initialPanel,
 }) => {
-
+  const cloud = isCloudDeployment();
   const [activePanel, setActivePanel] = useState<SettingsPanelId>(() => initialPanel ?? 'ai');
   const [favSaving, setFavSaving] = useState(false);
   const [favSaveHint, setFavSaveHint] = useState<{ ok: boolean; text: string } | null>(null);
@@ -341,6 +342,13 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 mb-8">
         {SETTINGS_PANELS.map(({ id, title, subtitle, icon: Icon, activeClass, idleClass }) => {
           const isOn = activePanel === id;
+          const panelTitle = id === 'localDb' ? (cloud ? '云端数据' : '本地数据') : title;
+          const panelSubtitle =
+            id === 'localDb'
+              ? cloud
+                ? 'PostgreSQL · 账号隔离'
+                : 'SQLite 路径 / 备份'
+              : subtitle;
           return (
             <button
               key={id}
@@ -357,9 +365,9 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                 <Icon className="w-5 h-5" />
               </div>
               <div className="min-w-0 flex-1 overflow-hidden">
-                <div className="font-bold text-sm sm:text-base leading-tight">{title}</div>
+                <div className="font-bold text-sm sm:text-base leading-tight">{panelTitle}</div>
                 <div className="text-xs mt-1 opacity-80 leading-snug whitespace-nowrap overflow-hidden text-ellipsis">
-                  {subtitle}
+                  {panelSubtitle}
                 </div>
               </div>
             </button>
@@ -770,16 +778,48 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
               <Icons.Database className="w-5 h-5" />
             </div>
             <div>
-              <h2 className="text-lg font-bold text-slate-900">本地数据库（SQLite）</h2>
+              <h2 className="text-lg font-bold text-slate-900">
+                {cloud ? '云端数据库（PostgreSQL）' : '本地数据库（SQLite）'}
+              </h2>
               <p className="text-sm text-slate-500">
-                数据由本机后台服务写入磁盘，可与浏览器缓存分离。请先运行 <code className="text-xs bg-slate-100 px-1 rounded">npm run server</code>{' '}
-                或使用启动脚本。默认数据库在应用程序所在目录下的{' '}
-                <code className="text-xs bg-slate-100 px-1 rounded">data/smartcat-local.db</code>（随文件夹拷贝即可迁移，勿写死其他盘符）。
+                {cloud
+                  ? '项目、记忆库、术语库、知识库及各项设置均保存在云端 PostgreSQL，按登录账号（组织）隔离。换设备登录同一账号即可继续工作。'
+                  : '数据由本机后台服务写入磁盘，可与浏览器缓存分离。请先运行 npm run server 或使用启动脚本。默认数据库在应用程序所在目录下的 data/smartcat-local.db（随文件夹拷贝即可迁移，勿写死其他盘符）。'}
               </p>
             </div>
           </div>
 
           <div className="space-y-5">
+            {cloud ? (
+              <>
+                {localDbLoading && (
+                  <p className="text-sm text-slate-500">正在检查云端连接…</p>
+                )}
+                {localDbErr && (
+                  <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                    <span className="font-semibold">无法连接云端 API：</span> {localDbErr}
+                    <p className="text-xs mt-2 opacity-90">
+                      请检查网络连接。托管 API 在长时间无访问后可能休眠，首次请求需等待约 30–60 秒唤醒。
+                    </p>
+                  </div>
+                )}
+                {(localDbInfo || (!localDbLoading && !localDbErr)) && (
+                  <div className="rounded-xl border border-emerald-200 bg-emerald-50/80 px-4 py-4 space-y-3 text-sm">
+                    <div className="flex items-center gap-2">
+                      <span className="inline-flex h-2 w-2 rounded-full bg-emerald-500" aria-hidden />
+                      <span className="font-semibold text-emerald-900">云端模式已启用</span>
+                    </div>
+                    <ul className="space-y-2 text-slate-600 text-sm leading-relaxed">
+                      <li>• 数据库类型：PostgreSQL（Supabase）</li>
+                      <li>• 数据按账号隔离，仅本人可见</li>
+                      <li>• 建议定期在「语言资源」页导出 Excel 备份术语库与记忆库</li>
+                      <li>• SQLite 路径切换、整库导入导出仅在本地版可用</li>
+                    </ul>
+                  </div>
+                )}
+              </>
+            ) : (
+              <>
             {localDbLoading && (
               <p className="text-sm text-slate-500">正在读取本地服务配置…</p>
             )}
@@ -876,6 +916,8 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                 <p className="text-xs text-slate-500">
                   导入文件须为有效的 SQLite 数据库（例如此前在本页导出的备份）。导入成功后页面会自动刷新。
                 </p>
+              </>
+            )}
               </>
             )}
             {localDbMsg && (
@@ -975,7 +1017,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                 <span className="font-mono text-xs text-slate-600 block mt-1 break-all">
                   https://dict.youdao.com/
                 </span>
-                编辑后请点击「保存到数据库」写入本地 SQLite（settings_kv · custom-online-dictionaries）。
+                {saveSettingsHint('custom-online-dictionaries')}
               </p>
             </div>
             <div className="flex flex-col items-stretch sm:items-end gap-2 shrink-0">
@@ -988,7 +1030,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                     setDictSaveHint(null);
                     try {
                       await onSaveCustomOnlineDictionaries();
-                      setDictSaveHint({ ok: true, text: '已保存到本地数据库。' });
+                      setDictSaveHint({ ok: true, text: savedToDatabaseMessage() });
                     } catch (e) {
                       setDictSaveHint({
                         ok: false,
@@ -1143,7 +1185,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
               <h2 className="text-lg font-bold text-slate-900">收藏网址</h2>
               <p className="text-sm text-slate-500">
                 在顶部栏点击「收藏」即可在新标签页打开。地址可写完整 URL，也可省略协议（将自动使用 https）。
-                编辑列表后请点击「保存到数据库」写入本地 SQLite（settings_kv · favorite-urls），刷新后仍会保留。
+                {saveSettingsHint('favorite-urls')}
               </p>
             </div>
             <div className="flex flex-col items-stretch sm:items-end gap-2 shrink-0">
@@ -1156,7 +1198,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                     setFavSaveHint(null);
                     try {
                       await onSaveFavoriteUrls();
-                      setFavSaveHint({ ok: true, text: '已保存到本地数据库。' });
+                      setFavSaveHint({ ok: true, text: savedToDatabaseMessage() });
                     } catch (e) {
                       setFavSaveHint({
                         ok: false,

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Icons } from './ui/Icons';
 import { APP_DISPLAY_VERSION } from '../constants';
+import { isCloudDeployment } from '../services/deploymentMode';
 import type { HomeLaunchTarget } from '../pages/Home';
 
 export type WelcomeLaunchTarget = HomeLaunchTarget | 'home';
@@ -30,6 +31,7 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
   onLaunch,
 }) => {
   const [skipNextStartup, setSkipNextStartup] = useState(false);
+  const cloud = isCloudDeployment();
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -61,11 +63,14 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
             <Icons.Sparkles className="h-9 w-9 text-white" strokeWidth={1.75} />
           </div>
           <h1 className="text-2xl font-bold tracking-tight text-slate-900 sm:text-3xl">Smart-CAT Studio</h1>
-          <p className="mt-2 text-sm text-slate-600">计算机辅助翻译工作台 · 版本 {APP_DISPLAY_VERSION}</p>
+          <p className="mt-2 text-sm text-slate-600">
+            计算机辅助翻译工作台 · 版本 {APP_DISPLAY_VERSION}
+            {cloud ? ' · 云端版' : ''}
+          </p>
           {!isDataReady ? (
             <p className="mt-4 flex items-center justify-center gap-2 text-sm text-blue-600">
               <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-blue-200 border-t-blue-600" />
-              正在加载本地数据…
+              {cloud ? '正在从云端加载数据…' : '正在加载本地数据…'}
             </p>
           ) : (
             <p className="mt-3 text-xs text-slate-500">
@@ -100,7 +105,11 @@ export const WelcomeScreen: React.FC<WelcomeScreenProps> = ({
         <ul className="mb-6 space-y-2.5 text-sm text-slate-600">
           <li className="flex gap-2">
             <Icons.Check className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" strokeWidth={2.5} />
-            <span>数据保存在本机 SQLite，可随时在系统设置中查看库路径与容量。</span>
+            <span>
+              {cloud
+                ? '项目与翻译资源保存在云端 PostgreSQL，登录同一账号可在任意设备访问。'
+                : '数据保存在本机 SQLite，可随时在系统设置中查看库路径与容量。'}
+            </span>
           </li>
           <li className="flex gap-2">
             <Icons.Sparkles className="mt-0.5 h-4 w-4 shrink-0 text-blue-600" />

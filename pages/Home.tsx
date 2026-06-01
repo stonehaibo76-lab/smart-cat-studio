@@ -1,6 +1,7 @@
 import React from 'react';
 import { Icons } from '../components/ui/Icons';
 import { APP_DISPLAY_VERSION } from '../constants';
+import { isCloudDeployment } from '../services/deploymentMode';
 import type { Project } from '../types';
 
 export type HomeLaunchTarget =
@@ -77,6 +78,12 @@ const MODULES: Array<{
 ];
 
 export const HomePage: React.FC<HomePageProps> = ({ projects, onNavigate, onOpenProject }) => {
+  const cloud = isCloudDeployment();
+  const modules = MODULES.map((m) =>
+    m.id === 'settings'
+      ? { ...m, desc: cloud ? 'AI、性能与云端数据' : 'AI、性能与本地数据配置' }
+      : m
+  );
   const recent = [...projects]
     .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))
     .slice(0, 4);
@@ -93,7 +100,7 @@ export const HomePage: React.FC<HomePageProps> = ({ projects, onNavigate, onOpen
         </header>
 
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          {MODULES.map((m) => {
+          {modules.map((m) => {
             const Icon = m.icon;
             return (
               <button

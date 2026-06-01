@@ -49,6 +49,7 @@ import {
   logout,
   type AuthUser,
 } from './services/authService';
+import { isCloudDeployment } from './services/deploymentMode';
 
 const Resources = lazy(() => import('./pages/Resources').then((m) => ({ default: m.Resources })));
 const Help = lazy(() => import('./pages/Help').then((m) => ({ default: m.Help })));
@@ -1510,6 +1511,7 @@ const App: React.FC = () => {
   }
 
   if (startupError) {
+    const cloud = isCloudDeployment();
     return (
       <ErrorBoundary>
         <div className="flex h-screen w-screen items-center justify-center bg-red-50 p-6">
@@ -1517,10 +1519,14 @@ const App: React.FC = () => {
             <div className="border-b border-red-100 bg-red-600 px-6 py-4 text-white">
               <div className="flex items-center gap-3">
                 <Icons.AlertTriangle className="h-6 w-6" />
-                <h2 className="text-lg font-semibold">SQLite 启动检查未通过</h2>
+                <h2 className="text-lg font-semibold">
+                  {cloud ? '云端 API 连接失败' : 'SQLite 启动检查未通过'}
+                </h2>
               </div>
               <p className="mt-1 text-sm text-red-50">
-                当前为强制 SQLite 模式。为防止数据写入其他存储，应用已阻止继续运行。
+                {cloud
+                  ? '无法连接云端后端，应用暂时无法加载数据。请检查网络后重试。'
+                  : '当前为强制 SQLite 模式。为防止数据写入其他存储，应用已阻止继续运行。'}
               </p>
             </div>
 
@@ -1532,19 +1538,34 @@ const App: React.FC = () => {
               <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
                 <p className="font-medium text-slate-900">请按以下步骤检查：</p>
                 <ul className="mt-2 list-disc space-y-1 pl-5">
-                  <li>在项目目录启动本地后端：<code>npm run dev:with-db</code>（或 <code>npm run server</code>）</li>
-                  <li>打开 <code>http://127.0.0.1:58741/api/health</code>，确认返回 <code>ok: true</code></li>
-                  <li>确认数据库路径为你指定的本地库文件（例如 <code>smartcat-db-path.json</code>）</li>
+                  {cloud ? (
+                    <>
+                      <li>确认网络连接正常，可访问云端 API</li>
+                      <li>
+                        打开 API 健康检查地址（如部署文档中的{' '}
+                        <code>/api/health</code>），确认返回 <code>ok: true</code>
+                      </li>
+                      <li>若 API 长时间未访问，免费托管可能休眠，等待 30–60 秒后重试</li>
+                    </>
+                  ) : (
+                    <>
+                      <li>在项目目录启动本地后端：<code>npm run dev:with-db</code>（或 <code>npm run server</code>）</li>
+                      <li>打开 <code>http://127.0.0.1:58741/api/health</code>，确认返回 <code>ok: true</code></li>
+                      <li>确认数据库路径为你指定的本地库文件（例如 <code>smartcat-db-path.json</code>）</li>
+                    </>
+                  )}
                 </ul>
               </div>
 
               <div className="flex items-center justify-end gap-3">
-                <button
-                  onClick={() => window.open('http://127.0.0.1:58741/api/health', '_blank')}
-                  className="rounded-md border border-slate-300 bg-white px-4 py-2 text-slate-700 hover:bg-slate-50"
-                >
-                  打开健康检查
-                </button>
+                {!cloud && (
+                  <button
+                    onClick={() => window.open('http://127.0.0.1:58741/api/health', '_blank')}
+                    className="rounded-md border border-slate-300 bg-white px-4 py-2 text-slate-700 hover:bg-slate-50"
+                  >
+                    打开健康检查
+                  </button>
+                )}
                 <button
                   onClick={() => window.location.reload()}
                   className="rounded-md bg-blue-600 px-4 py-2 text-white hover:bg-blue-700"

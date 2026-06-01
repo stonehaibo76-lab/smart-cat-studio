@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Icons } from '../components/ui/Icons';
 import { APP_DISPLAY_VERSION } from '../constants';
+import { isCloudDeployment } from '../services/deploymentMode';
 
 export const Help: React.FC = () => {
   const [activeSection, setActiveSection] = useState<string>('overview');
@@ -85,7 +86,9 @@ export const Help: React.FC = () => {
   );
 };
 
-const OverviewSection = () => (
+const OverviewSection = () => {
+  const cloud = isCloudDeployment();
+  return (
   <div className="space-y-8">
     <div>
       <h2 className="text-3xl font-bold text-slate-900 mb-4">欢迎使用 Smart-CAT Studio</h2>
@@ -93,6 +96,7 @@ const OverviewSection = () => (
         Smart-CAT Studio 是一款专业的计算机辅助翻译（CAT）工具，旨在帮助翻译人员提高工作效率，
         确保翻译质量和一致性。本工具集成了翻译记忆库、术语库、可检索的翻译知识库（RAG）、AI 辅助翻译等功能，
         让您的翻译工作更加轻松高效。
+        {cloud ? ' 当前为云端版：项目与资源保存在 PostgreSQL，登录同一账号可在任意设备继续工作。' : ''}
       </p>
     </div>
 
@@ -185,9 +189,12 @@ const OverviewSection = () => (
       </div>
     </div>
   </div>
-);
+  );
+};
 
-const WhatsNewSection = () => (
+const WhatsNewSection = () => {
+  const cloud = isCloudDeployment();
+  return (
   <div className="space-y-8">
     <div>
       <h2 className="text-3xl font-bold text-slate-900 mb-4">更新说明 · {APP_DISPLAY_VERSION}</h2>
@@ -210,7 +217,7 @@ const WhatsNewSection = () => (
             </li>
             <li className="flex gap-2">
               <Icons.Check className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
-              <span><strong className="text-slate-900">{APP_DISPLAY_VERSION}</strong>：编辑器「查找与替换」支持正则及 <code className="bg-white/80 px-1 rounded">$1</code> 等替换模板；本地 SQLite 在 <code className="bg-white/80 px-1 rounded">documents</code> 表含 <code className="bg-white/80 px-1 rounded">org_id</code> 时读写兼容。</span>
+              <span><strong className="text-slate-900">{APP_DISPLAY_VERSION}</strong>：编辑器「查找与替换」支持正则及 <code className="bg-white/80 px-1 rounded">$1</code> 等替换模板；{cloud ? '云端 PostgreSQL 与本地 SQLite 均在' : '本地 SQLite 在'} <code className="bg-white/80 px-1 rounded">documents</code> 表含 <code className="bg-white/80 px-1 rounded">org_id</code> 时读写兼容。</span>
             </li>
             <li className="flex gap-2">
               <Icons.Check className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
@@ -255,11 +262,18 @@ const WhatsNewSection = () => (
       <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">
         <h3 className="text-xl font-bold text-slate-900 mb-4 flex items-center gap-2">
           <Icons.Settings className="w-5 h-5 text-slate-600" />
-          本地数据与 AI
+          {cloud ? '云端数据与 AI' : '本地数据与 AI'}
         </h3>
         <ul className="space-y-2 text-slate-600 text-sm">
-          <li>• 项目与资源统一由本机 SQLite 持久化；「本地数据」面板可查看路径、导出备份与恢复。</li>
-          <li>• AI 引擎（Gemini / DeepSeek 等）、快捷按钮与编辑器偏好均写入同一后端，换机请先备份数据库文件。</li>
+          <li>
+            •{' '}
+            {cloud
+              ? '项目与资源统一保存在云端 PostgreSQL，按登录账号隔离；可在「系统设置 → 云端数据」查看说明。'
+              : '项目与资源统一由本机 SQLite 持久化；「本地数据」面板可查看路径、导出备份与恢复。'}
+          </li>
+          <li>
+            • AI 引擎（Gemini / DeepSeek 等）、快捷按钮与编辑器偏好均写入{cloud ? '云端' : '同一本地后端'}，{cloud ? '换设备登录同一账号即可同步。' : '换机请先备份数据库文件。'}
+          </li>
         </ul>
       </div>
     </div>
@@ -272,14 +286,17 @@ const WhatsNewSection = () => (
         <div>
           <h3 className="text-lg font-bold text-slate-900 mb-2">后续版本</h3>
           <p className="text-slate-600 text-sm">
-            若您从旧版本升级，建议在完成数据库备份后覆盖安装或替换前端资源包；首次启动后可在「本地数据」确认路径无误。
+            {cloud
+              ? '云端版数据随账号保存在服务器，无需手动迁移数据库文件。建议在语言资源页定期导出 Excel 备份。'
+              : '若您从旧版本升级，建议在完成数据库备份后覆盖安装或替换前端资源包；首次启动后可在「本地数据」确认路径无误。'}
             更细分的变更日志如有需要可单独维护在外部文档或发行说明中。
           </p>
         </div>
       </div>
     </div>
   </div>
-);
+  );
+};
 
 const QuickStartSection = () => (
   <div className="space-y-8">
@@ -1382,12 +1399,17 @@ const KnowledgeSection = () => (
   </div>
 );
 
-const SettingsSection = () => (
+const SettingsSection = () => {
+  const cloud = isCloudDeployment();
+  return (
   <div className="space-y-8">
     <div>
       <h2 className="text-3xl font-bold text-slate-900 mb-4">系统设置页面</h2>
       <p className="text-lg text-slate-600">
-        系统设置分为多个面板：AI 引擎、向量检索（知识库 RAG）、本地数据（SQLite 路径与备份导入导出）、以及 AI 对话快捷按钮。使用前需已启动本地数据服务（见下方说明），否则应用无法读写项目数据。
+        系统设置分为多个面板：AI 引擎、向量检索（知识库 RAG）、{cloud ? '云端数据' : '本地数据（SQLite 路径与备份导入导出）'}、以及 AI 对话快捷按钮。
+        {cloud
+          ? ' 云端版登录后即可读写项目数据，无需在本机启动数据库服务。'
+          : ' 使用前需已启动本地数据服务（见下方说明），否则应用无法读写项目数据。'}
       </p>
     </div>
 
@@ -1418,7 +1440,7 @@ const SettingsSection = () => (
           <div className="bg-blue-50 p-4 rounded-lg border border-blue-200">
             <strong className="text-slate-900">配置 API Key：</strong>
             <p className="text-sm mt-1">
-              DeepSeek 等需在设置中填写 API Key，与 AI 设置、快捷按钮等一并由<strong className="text-slate-900">本地后端写入 SQLite</strong>持久化（非浏览器 IndexedDB）。
+              DeepSeek 等需在设置中填写 API Key，与 AI 设置、快捷按钮等一并由<strong className="text-slate-900">{cloud ? '云端 API 持久化到 PostgreSQL' : '本地后端写入 SQLite'}</strong>（非浏览器 IndexedDB）。
               Google Gemini 的调用密钥由运行环境提供（界面显示为已通过环境变量加载），请按部署说明配置。
             </p>
           </div>
@@ -1428,15 +1450,30 @@ const SettingsSection = () => (
       <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">
         <h3 className="text-xl font-bold text-slate-900 mb-4 flex items-center gap-2">
           <Icons.Database className="w-5 h-5 text-slate-700" />
-          本地数据（SQLite）
+          {cloud ? '云端数据（PostgreSQL）' : '本地数据（SQLite）'}
         </h3>
         <div className="space-y-4 text-slate-600">
-          <p>
-            项目、记忆库、术语库、知识库、孪生译员及上述 AI 设置等均保存在本机 SQLite 数据库中。在「本地数据」面板可查看或修改数据库路径、导出备份文件、或从备份恢复。
-          </p>
-          <p className="text-sm">
-            请使用带本地后端的启动方式（例如开发环境中的 <code className="px-1 py-0.5 bg-slate-100 rounded text-xs">npm run dev:with-db</code> 或文档中的 <code className="px-1 py-0.5 bg-slate-100 rounded text-xs">npm run server</code>），确保前端能连上本地 API；未连接后端时应用会阻止写入，避免数据落到非预期位置。
-          </p>
+          {cloud ? (
+            <>
+              <p>
+                项目、记忆库、术语库、知识库、孪生译员及上述 AI 设置等均保存在云端 PostgreSQL 数据库中，按登录账号（组织）隔离。
+                换设备、换浏览器，只要登录同一账号即可访问全部数据。
+              </p>
+              <p className="text-sm">
+                在「云端数据」面板可查看连接状态与存储说明。SQLite 路径切换、整库导入导出仅在本地开发版可用。
+                建议定期在「语言资源」页导出 Excel 备份术语库与记忆库。
+              </p>
+            </>
+          ) : (
+            <>
+              <p>
+                项目、记忆库、术语库、知识库、孪生译员及上述 AI 设置等均保存在本机 SQLite 数据库中。在「本地数据」面板可查看或修改数据库路径、导出备份文件、或从备份恢复。
+              </p>
+              <p className="text-sm">
+                请使用带本地后端的启动方式（例如开发环境中的 <code className="px-1 py-0.5 bg-slate-100 rounded text-xs">npm run dev:with-db</code> 或文档中的 <code className="px-1 py-0.5 bg-slate-100 rounded text-xs">npm run server</code>），确保前端能连上本地 API；未连接后端时应用会阻止写入，避免数据落到非预期位置。
+              </p>
+            </>
+          )}
         </div>
       </div>
 
@@ -1507,16 +1544,18 @@ const SettingsSection = () => (
               <li>• 根据翻译需求选择合适的 AI 引擎</li>
               <li>• 定期更新 API Key，确保服务正常使用</li>
               <li>• 根据工作习惯自定义快捷按钮</li>
-              <li>• 编辑器主题、字体与句段自动传播等可在翻译编辑器的设置中调整，并会随「编辑器设置」一并保存到本地数据库</li>
+              <li>• 编辑器主题、字体与句段自动传播等可在翻译编辑器的设置中调整，并会随「编辑器设置」一并保存到{cloud ? '云端' : '本地数据库'}</li>
             </ul>
           </div>
         </div>
       </div>
     </div>
   </div>
-);
+  );
+};
 
 const FAQSection = () => {
+  const cloud = isCloudDeployment();
   const faqs = [
     {
       question: `${APP_DISPLAY_VERSION} 有哪些新内容？`,
@@ -1556,7 +1595,9 @@ const FAQSection = () => {
     },
     {
       question: "如何配置 AI 翻译功能？",
-      answer: "打开「系统设置 → AI 引擎」，选择默认引擎。DeepSeek 需在页面中填写 API Key（写入本地 SQLite）；Gemini 由运行环境提供密钥（界面提示已通过环境变量加载）。可使用「测试引擎连接」确认配置。"
+      answer: cloud
+        ? "打开「系统设置 → AI 引擎」，选择默认引擎。DeepSeek 需在页面中填写 API Key（保存到云端 PostgreSQL）；Gemini 由运行环境提供密钥（界面提示已通过环境变量加载）。可使用「测试引擎连接」确认配置。"
+        : "打开「系统设置 → AI 引擎」，选择默认引擎。DeepSeek 需在页面中填写 API Key（写入本地 SQLite）；Gemini 由运行环境提供密钥（界面提示已通过环境变量加载）。可使用「测试引擎连接」确认配置。"
     },
     {
       question: "翻译进度如何计算？",
@@ -1572,7 +1613,9 @@ const FAQSection = () => {
     },
     {
       question: "数据存储在哪里？",
-      answer: "项目、文件句段、翻译记忆库、术语库、知识库、孪生译员以及 AI / 编辑器相关设置等，均通过本地后端持久化到本机 SQLite 数据库（路径可在「系统设置 → 本地数据」查看与调整）。请保持本地数据服务可用，并定期在该面板或语言资源页导出备份，以防磁盘损坏或换机。"
+      answer: cloud
+        ? "项目、文件句段、翻译记忆库、术语库、知识库、孪生译员以及 AI / 编辑器相关设置等，均保存在云端 PostgreSQL，按登录账号隔离。换设备登录同一账号即可继续工作。建议定期在「语言资源」页导出 Excel 备份。"
+        : "项目、文件句段、翻译记忆库、术语库、知识库、孪生译员以及 AI / 编辑器相关设置等，均通过本地后端持久化到本机 SQLite 数据库（路径可在「系统设置 → 本地数据」查看与调整）。请保持本地数据服务可用，并定期在该面板或语言资源页导出备份，以防磁盘损坏或换机。"
     },
     {
       question: "孪生译员和普通 AI 翻译有什么区别？",
