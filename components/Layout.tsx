@@ -217,6 +217,7 @@ export const Layout: React.FC<LayoutProps> = ({
     authUser = null,
     onLogout,
 }) => {
+  const cloud = isCloudDeployment();
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(true);
   const [showFileMenu, setShowFileMenu] = useState(false);
   const [showFavoriteMenu, setShowFavoriteMenu] = useState(false);
@@ -278,6 +279,9 @@ export const Layout: React.FC<LayoutProps> = ({
   const canOriginalFormatExport = originalFormatFilesInScope.some((f) =>
     canFormatPreservingExport(f)
   );
+  const showOriginalFormatExportOption = canOriginalFormatExport && !cloud;
+  const showOriginalFormatCloudHint =
+    cloud && originalFormatFilesInScope.length > 0;
 
   const openExportOptions = () => {
     setExportOptions((prev) => {
@@ -286,6 +290,7 @@ export const Layout: React.FC<LayoutProps> = ({
       else if (hasSdlxliffExport) next.format = 'sdlxliff';
       else if (hasMqxliffExport) next.format = 'mqxliff';
       else next.format = 'excel';
+      if (cloud && next.format === 'original') next.format = 'excel';
       return next;
     });
     setShowExportOptions(true);
@@ -666,7 +671,7 @@ export const Layout: React.FC<LayoutProps> = ({
                                                         />
                                                         <span>TMX 文件 (.tmx)</span>
                                                     </label>
-                                                    {canOriginalFormatExport && (
+                                                    {showOriginalFormatExportOption && (
                                                       <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer hover:bg-slate-50 p-1.5 rounded">
                                                         <input
                                                           type="radio"
@@ -679,7 +684,12 @@ export const Layout: React.FC<LayoutProps> = ({
                                                         <span>原文格式（单语）</span>
                                                       </label>
                                                     )}
-                                                    {originalFormatFilesInScope.length > 0 && !canOriginalFormatExport && (
+                                                    {showOriginalFormatCloudHint && (
+                                                      <p className="text-[11px] text-slate-500 leading-relaxed pl-1">
+                                                        原文格式（单语）需在本地版导出（保留 Word 版式与字体）。云端请使用 Excel / TMX，或下载本地版后导出 DOCX。
+                                                      </p>
+                                                    )}
+                                                    {!cloud && originalFormatFilesInScope.length > 0 && !canOriginalFormatExport && (
                                                       <p className="text-[11px] text-amber-700 leading-relaxed pl-1">
                                                         当前文件尚无原文件备份，请重新导入文档后再使用保真导出。
                                                       </p>

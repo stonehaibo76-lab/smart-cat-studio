@@ -1096,6 +1096,10 @@ const App: React.FC = () => {
     };
 
     if (options.format === 'original') {
+      if (isCloudDeployment()) {
+        alert('原文格式（单语）导出需在本地版完成（需 Okapi 侧车）。云端请使用 Excel / TMX 导出，或在本机运行 Smart CAT Studio 便携版后再导出 DOCX。');
+        return;
+      }
       const okapiSettings: OkapiSettings = DEFAULT_OKAPI_SETTINGS;
       try {
         const filesToExport =
