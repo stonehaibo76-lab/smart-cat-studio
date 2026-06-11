@@ -12,7 +12,8 @@ function resolveApiBase(): string {
   const fromEnv =
     (import.meta.env.VITE_API_BASE_URL as string | undefined) ||
     (import.meta.env.VITE_LOCAL_DB_URL as string | undefined);
-  return (fromEnv ?? 'http://127.0.0.1:58741').replace(/\/$/, '');
+  const trimmed = fromEnv?.trim();
+  return (trimmed || 'http://127.0.0.1:58741').replace(/\/$/, '');
 }
 
 export function getApiBaseUrl(): string {

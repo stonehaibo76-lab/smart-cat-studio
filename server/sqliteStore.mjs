@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import Database from 'better-sqlite3';
+import { attachTmIndex } from './tmIndex.mjs';
 
 const SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS documents (
@@ -225,6 +226,25 @@ export function createSqliteStore(projectRoot) {
   dbPath = startup.dbPath;
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
   sqlite = connectSqlite(dbPath);
+  const tmIndex = attachTmIndex(sqlite);
+
+  try {
+    const row = sqlite.prepare('SELECT COUNT(*) AS c FROM tm_units').get();
+    if (!row?.c) {
+      tmIndex.backfillFromCollection((name) => {
+        let rows;
+        if (documentsMeta.hasOrgId) {
+          const oid = resolveOrgIdForDocuments();
+          rows = sqlite.prepare('SELECT payload FROM documents WHERE collection = ? AND org_id = ?').all(name, oid);
+        } else {
+          rows = sqlite.prepare('SELECT payload FROM documents WHERE collection = ?').all(name);
+        }
+        return rows.map((r) => JSON.parse(r.payload));
+      });
+    }
+  } catch {
+    /* ignore backfill errors */
+  }
 
   return {
     mode: 'sqlite',
@@ -317,6 +337,9 @@ export function createSqliteStore(projectRoot) {
           }
         });
         tx(items);
+        if (name === 'translationMemories') {
+          tmIndex.syncTranslationMemories(items);
+        }
         return;
       }
       const del = sqlite.prepare('DELETE FROM documents WHERE collection = ?');
@@ -332,6 +355,9 @@ export function createSqliteStore(projectRoot) {
         }
       });
       tx(items);
+      if (name === 'translationMemories') {
+        tmIndex.syncTranslationMemories(items);
+      }
     },
     async putXliffBlob(id, buf) {
       sqlite
@@ -409,5 +435,6 @@ export function createSqliteStore(projectRoot) {
       res.setHeader('Content-Disposition', `attachment; filename="${safeName}"`);
       fs.createReadStream(dbPath).pipe(res);
     },
+    tmIndex,
   };
 }

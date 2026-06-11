@@ -16,11 +16,18 @@ export default defineConfig(({ mode }) => {
          host: env.DEV_SERVER_HOST || 'localhost',
          strictPort: false, // ✅ 自动跳过占用端口，不用手动干预
          open: false, // 避免重复弹出浏览器窗口
+         proxy: {
+           '/api': {
+             target: env.VITE_API_BASE_URL?.trim() || 'http://127.0.0.1:58741',
+             changeOrigin: true,
+           },
+         },
       },
       plugins: [react(), smartCatDevServerPlugin(projectRoot)],
       define: {
         'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),
-        'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY)
+        'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY),
+        'import.meta.env.VITE_PACKAGE_PROFILE': JSON.stringify(env.VITE_PACKAGE_PROFILE || ''),
       },
       resolve: {
         alias: {

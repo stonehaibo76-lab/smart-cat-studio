@@ -4,15 +4,13 @@ import { applyMqTranslations, mqxliffToBytes } from './mqxliffHandler';
 import { buildSdlrpxPackage } from './tradosPackageHandler';
 import { loadXliffBlob, bytesToUtf8, detectBom } from './xliffBlobStore';
 import { inferFileInterchangeFormat } from './projectXliffDetect';
+import { segmentStatusToSdlSlug } from '../../utils/segmentStatusUi';
 
 function segmentToSdlExport(seg: Segment): SdlExportSegment {
-  let status = 'translated';
-  if (seg.status === 'Confirmed') status = 'approved';
-  else if (seg.status === 'Draft') status = 'draft';
   return {
     segmentId: seg.xliffSegmentId ?? '',
     targetText: seg.targetText,
-    status,
+    status: segmentStatusToSdlSlug(seg.status),
     modified: seg.xliffModified === true,
   };
 }

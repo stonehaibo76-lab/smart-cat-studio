@@ -1,3 +1,4 @@
+import fs from 'fs';
 import http from 'http';
 import express from 'express';
 import cors from 'cors';
@@ -16,6 +17,23 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.join(__dirname, '..');
 const PORT = Number(process.env.PORT || process.env.SMARTCAT_LOCAL_DB_PORT || 58741);
 const cloud = isCloudMode();
+const serveStatic = process.env.SMARTCAT_SERVE_STATIC === '1';
+const distDir = process.env.SMARTCAT_DIST_DIR?.trim() || path.join(projectRoot, 'dist');
+
+const PORTABLE_MT_DEFAULTS = {
+  enabled: true,
+  serviceUrl: 'http://127.0.0.1:8770',
+  defaultTranslator: 'youdao',
+  enabledTranslators: [
+    'cloudTranslation', 'google', 'iciba', 'iflyrec', 'itranslate', 'lara', 'lingvanex', 'modernMt',
+    'papago', 'qqTranSmart', 'reverso', 'sogou', 'sysTran', 'translateCom', 'xunjie', 'yandex', 'youdao',
+  ],
+  autoLookupOnSegmentChange: true,
+  compareMode: false,
+  compareTranslators: ['youdao', 'cloudTranslation', 'sogou', 'qqTranSmart'],
+  engineCatalogVersion: 3,
+  disableStartupPreaccelerate: true,
+};
 
 async function createStore() {
   if (cloud) {
@@ -25,6 +43,16 @@ async function createStore() {
 }
 
 const store = await createStore();
+
+async function bootstrapPortableDefaults() {
+  if (cloud || process.env.SMARTCAT_PACKAGE_MODE !== 'portable' || !store.putSetting) return;
+  const existing = await store.getSetting('mt-reference-settings');
+  if (existing != null) return;
+  await store.putSetting('mt-reference-settings', PORTABLE_MT_DEFAULTS);
+  console.log('Portable bootstrap: enabled MT reference defaults (8770)');
+}
+
+await bootstrapPortableDefaults();
 
 const app = express();
 
@@ -53,16 +81,18 @@ app.get('/api/health', async (_req, res) => {
   }
 });
 
-app.get('/', (_req, res) => {
-  res
-    .status(200)
-    .type('text/plain; charset=utf-8')
-    .send(
-      cloud
-        ? 'SmartCAT Cloud API is running. Use /api/health to verify connectivity.'
-        : 'SmartCAT local DB API is running. Use /api/health to verify connectivity.'
-    );
-});
+if (!serveStatic) {
+  app.get('/', (_req, res) => {
+    res
+      .status(200)
+      .type('text/plain; charset=utf-8')
+      .send(
+        cloud
+          ? 'SmartCAT Cloud API is running. Use /api/health to verify connectivity.'
+          : 'SmartCAT local DB API is running. Use /api/health to verify connectivity.'
+      );
+  });
+}
 
 if (store.supportsLocalDbAdmin) {
   app.put(
@@ -176,6 +206,7 @@ app.get('/api/load-all', maybeRequireAuth, async (req, res) => {
       favoriteUrls: (await store.getSetting('favorite-urls', req)) ?? null,
       customOnlineDictionaries: (await store.getSetting('custom-online-dictionaries', req)) ?? null,
       embeddingSettings: (await store.getSetting('embedding-settings', req)) ?? null,
+      mtReferenceSettings: (await store.getSetting('mt-reference-settings', req)) ?? null,
       welcomeCompleted: (await store.getSetting('welcome-completed', req)) === true,
       skipStartupScreen: (await store.getSetting('skip-startup-screen', req)) === true,
     };
@@ -252,6 +283,332 @@ app.put('/api/settings/:key', maybeRequireAuth, maybeRequireWrite, async (req, r
   }
 });
 
+// --- Local LLM proxy (llama-server OpenAI-compatible API) ---
+const LOCAL_LLM_TIMEOUT_MS = 180_000;
+
+function normalizeLlmBaseUrl(url) {
+  return String(url || '').replace(/\/+$/, '');
+}
+
+function assertLocalUpstream(baseUrl) {
+  let u;
+  try {
+    u = new URL(baseUrl);
+  } catch {
+    throw new Error('upstreamBaseUrl 无效');
+  }
+  const host = u.hostname.toLowerCase();
+  if (host !== '127.0.0.1' && host !== 'localhost' && host !== '::1') {
+    throw new Error('upstreamBaseUrl 仅允许 localhost / 127.0.0.1');
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    throw new Error('upstreamBaseUrl 须为 http 或 https 协议');
+  }
+  let normalized = normalizeLlmBaseUrl(baseUrl);
+  if (!/\/v1$/i.test(normalized)) {
+    normalized = `${normalized}/v1`;
+  }
+  return normalized;
+}
+
+function localLlmAuthHeaders(apiKey) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  return headers;
+}
+
+app.get('/api/local-llm/health', async (req, res) => {
+  try {
+    const upstream = assertLocalUpstream(
+      String(req.query.upstream || 'http://127.0.0.1:8080/v1')
+    );
+    const apiKey = req.query.apiKey ? String(req.query.apiKey) : undefined;
+    const headers = localLlmAuthHeaders(apiKey);
+
+    const modelsRes = await fetch(`${upstream}/models`, {
+      method: 'GET',
+      headers,
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (modelsRes.ok) {
+      res.json({ ok: true });
+      return;
+    }
+
+    const chatRes = await fetch(`${upstream}/chat/completions`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: 'local',
+        messages: [{ role: 'user', content: 'OK' }],
+        max_tokens: 8,
+        temperature: 0,
+        chat_template_kwargs: { enable_thinking: false },
+      }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!chatRes.ok) {
+      const t = await chatRes.text();
+      res.status(502).json({ ok: false, error: `llama-server ${chatRes.status}: ${t}` });
+      return;
+    }
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
+app.post('/api/local-llm/chat/completions', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const { upstreamBaseUrl, apiKey, ...payload } = body;
+    const upstream = assertLocalUpstream(upstreamBaseUrl || 'http://127.0.0.1:8080/v1');
+    const chatRes = await fetch(`${upstream}/chat/completions`, {
+      method: 'POST',
+      headers: localLlmAuthHeaders(apiKey || undefined),
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(LOCAL_LLM_TIMEOUT_MS),
+    });
+    const text = await chatRes.text();
+    res.status(chatRes.status).type('application/json').send(text);
+  } catch (e) {
+    res.status(502).json({ error: String(e.message || e) });
+  }
+});
+
+// --- MT reference proxy (translators Python sidecar) ---
+const MT_REFERENCE_TIMEOUT_MS = 35_000;
+
+function normalizeServiceBaseUrl(url) {
+  return String(url || '').replace(/\/+$/, '');
+}
+
+function assertLocalServiceUrl(baseUrl) {
+  let u;
+  try {
+    u = new URL(baseUrl);
+  } catch {
+    throw new Error('upstreamBaseUrl 无效');
+  }
+  const host = u.hostname.toLowerCase();
+  if (host !== '127.0.0.1' && host !== 'localhost' && host !== '::1') {
+    throw new Error('upstreamBaseUrl 仅允许 localhost / 127.0.0.1');
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    throw new Error('upstreamBaseUrl 须为 http 或 https 协议');
+  }
+  return normalizeServiceBaseUrl(baseUrl);
+}
+
+function mtReferenceAuthHeaders(apiKey) {
+  const headers = { 'Content-Type': 'application/json' };
+  if (apiKey) headers['X-API-Key'] = apiKey;
+  return headers;
+}
+
+app.get('/api/mt-reference/health', async (req, res) => {
+  try {
+    const upstream = assertLocalServiceUrl(
+      String(req.query.upstream || 'http://127.0.0.1:8770')
+    );
+    const apiKey = req.query.apiKey ? String(req.query.apiKey) : undefined;
+    const healthRes = await fetch(`${upstream}/health`, {
+      method: 'GET',
+      headers: mtReferenceAuthHeaders(apiKey),
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!healthRes.ok) {
+      const t = await healthRes.text();
+      res.status(502).json({ ok: false, error: `sidecar ${healthRes.status}: ${t}` });
+      return;
+    }
+    const data = await healthRes.json();
+    res.json({
+      ok: !!data.ok,
+      translatorsVersion: data.translators_version || data.translatorsVersion,
+    });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
+app.post('/api/mt-reference/translate', async (req, res) => {
+  try {
+    const body = req.body || {};
+    const {
+      upstreamBaseUrl,
+      apiKey,
+      text,
+      translator,
+      from_language: fromLanguage,
+      to_language: toLanguage,
+    } = body;
+    const upstream = assertLocalServiceUrl(upstreamBaseUrl || 'http://127.0.0.1:8770');
+    const translateRes = await fetch(`${upstream}/translate`, {
+      method: 'POST',
+      headers: mtReferenceAuthHeaders(apiKey || undefined),
+      body: JSON.stringify({
+        text: String(text || ''),
+        translator: String(translator || 'bing'),
+        from_language: String(fromLanguage || 'auto'),
+        to_language: String(toLanguage || 'en'),
+      }),
+      signal: AbortSignal.timeout(MT_REFERENCE_TIMEOUT_MS),
+    });
+    const payload = await translateRes.json().catch(async () => ({
+      ok: false,
+      error: await translateRes.text(),
+    }));
+    if (!translateRes.ok) {
+      res.status(translateRes.status).json({
+        ok: false,
+        error: payload.detail || payload.error || `sidecar ${translateRes.status}`,
+      });
+      return;
+    }
+    res.json({
+      ok: !!payload.ok,
+      text: payload.text,
+      translator: payload.translator,
+      elapsed_ms: payload.elapsed_ms,
+    });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
+// --- TM indexed search (SQLite local mode) ---
+app.post('/api/tm/search', maybeRequireAuth, async (req, res) => {
+  try {
+    if (!store.tmIndex?.searchTmMatches) {
+      res.status(501).json({ error: 'TM search not available in cloud mode yet' });
+      return;
+    }
+    const body = req.body || {};
+    const tmIds = Array.isArray(body.tmIds) ? body.tmIds.map(String).filter(Boolean) : [];
+    const sourceText = String(body.sourceText || '');
+    const minScore = Number(body.minScore) || 50;
+    const limit = Math.min(Number(body.limit) || 20, 50);
+    const tmNames = body.tmNames && typeof body.tmNames === 'object' ? body.tmNames : {};
+    const hits = store.tmIndex.searchTmMatches({ tmIds, sourceText, minScore, limit, tmNames });
+    res.json({ ok: true, hits });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: String(e.message || e) });
+  }
+});
+
+// --- Okapi sidecar proxy ---
+const OKAPI_TIMEOUT_MS = 300_000;
+
+app.get('/api/okapi/health', async (req, res) => {
+  try {
+    const upstream = assertLocalServiceUrl(String(req.query.serviceUrl || 'http://127.0.0.1:8090'));
+    const healthRes = await fetch(`${upstream}/health`, {
+      method: 'GET',
+      signal: AbortSignal.timeout(15_000),
+    });
+    const payload = await healthRes.json().catch(() => ({}));
+    res.json({
+      ok: !!payload.ok,
+      version: payload.version,
+      error: payload.error,
+      mergeSupported: payload.mergeSupported !== false,
+    });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
+app.post('/api/okapi/extract', maybeRequireAuth, maybeRequireWrite, express.json({ limit: '120mb' }), async (req, res) => {
+  try {
+    const body = req.body || {};
+    const upstream = assertLocalServiceUrl(String(body.serviceUrl || 'http://127.0.0.1:8090'));
+    const fileName = String(body.fileName || 'document');
+    const fileBase64 = String(body.fileBase64 || '');
+    if (!fileBase64) {
+      res.status(400).json({ ok: false, error: 'fileBase64 required' });
+      return;
+    }
+    const buf = Buffer.from(fileBase64, 'base64');
+    const form = new FormData();
+    form.append('file', new Blob([buf]), fileName);
+    const extractRes = await fetch(`${upstream}/extract`, {
+      method: 'POST',
+      body: form,
+      signal: AbortSignal.timeout(OKAPI_TIMEOUT_MS),
+    });
+    const payload = await extractRes.json().catch(async () => ({
+      ok: false,
+      error: await extractRes.text(),
+    }));
+    if (!extractRes.ok) {
+      res.status(extractRes.status).json({ ok: false, error: payload.error || payload.detail });
+      return;
+    }
+    res.json(payload);
+  } catch (e) {
+    res.status(502).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
+app.post('/api/okapi/merge', maybeRequireAuth, maybeRequireWrite, express.json({ limit: '120mb' }), async (req, res) => {
+  try {
+    const body = req.body || {};
+    const upstream = assertLocalServiceUrl(String(body.serviceUrl || 'http://127.0.0.1:8090'));
+    const fileName = String(body.fileName || 'document');
+    const fileBase64 = String(body.fileBase64 || '');
+    const segments = Array.isArray(body.segments) ? body.segments : [];
+    if (!fileBase64) {
+      res.status(400).json({ ok: false, error: 'fileBase64 required' });
+      return;
+    }
+    if (segments.length === 0) {
+      res.status(400).json({ ok: false, error: 'segments required' });
+      return;
+    }
+    const buf = Buffer.from(fileBase64, 'base64');
+    const form = new FormData();
+    form.append('file', new Blob([buf]), fileName);
+    form.append('segments_json', JSON.stringify(segments));
+    const exportFont = String(body.exportFont || 'simsun').trim();
+    form.append('export_font', exportFont);
+    const mergeRes = await fetch(`${upstream}/merge`, {
+      method: 'POST',
+      body: form,
+      signal: AbortSignal.timeout(OKAPI_TIMEOUT_MS),
+    });
+    if (!mergeRes.ok) {
+      const errPayload = await mergeRes.json().catch(async () => ({
+        error: await mergeRes.text(),
+      }));
+      res.status(mergeRes.status).json({ ok: false, error: errPayload.error || mergeRes.statusText });
+      return;
+    }
+    const mergedBuf = Buffer.from(await mergeRes.arrayBuffer());
+    const b64Name = mergeRes.headers.get('x-smartcat-file-name-b64');
+    let outName = mergeRes.headers.get('x-smartcat-file-name') || '';
+    if (b64Name) {
+      try {
+        outName = Buffer.from(b64Name, 'base64').toString('utf8');
+      } catch {
+        /* keep ascii header */
+      }
+    }
+    if (!outName) {
+      outName = `${fileName.replace(/\.[^.]+$/, '')}_译文${fileName.includes('.') ? fileName.slice(fileName.lastIndexOf('.')) : '.docx'}`;
+    }
+    res.json({
+      ok: true,
+      fileName: outName,
+      fileBase64: mergedBuf.toString('base64'),
+      mime: mergeRes.headers.get('content-type') || 'application/octet-stream',
+    });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
 app.get('/api/xliff-blobs/:id', maybeRequireAuth, async (req, res) => {
   try {
     const id = String(req.params.id || '').trim();
@@ -294,15 +651,34 @@ app.post('/api/xliff-blobs/delete-many', maybeRequireAuth, maybeRequireWrite, as
   }
 });
 
+if (serveStatic) {
+  if (!fs.existsSync(distDir)) {
+    console.error(`SMARTCAT_SERVE_STATIC=1 but dist folder not found: ${distDir}`);
+  } else {
+    app.use(express.static(distDir));
+    app.get('*', (req, res, next) => {
+      if (req.path.startsWith('/api')) {
+        next();
+        return;
+      }
+      res.sendFile(path.join(distDir, 'index.html'), (err) => {
+        if (err) next(err);
+      });
+    });
+    console.log(`Serving static UI from: ${distDir}`);
+  }
+}
+
 const host =
-  cloud || process.env.SMARTCAT_BIND_ALL === '1' || process.env.NODE_ENV === 'production'
+  cloud || process.env.SMARTCAT_BIND_ALL === '1'
     ? '0.0.0.0'
     : '127.0.0.1';
 
 const server = http.createServer(app);
 server.listen(PORT, host, () => {
   const mode = cloud ? 'Cloud (PostgreSQL)' : 'Local (SQLite)';
-  console.log(`SmartCAT API [${mode}] http://${host === '0.0.0.0' ? 'localhost' : host}:${PORT}`);
+  const uiNote = serveStatic ? ' + static UI' : '';
+  console.log(`SmartCAT API [${mode}${uiNote}] http://${host === '0.0.0.0' ? 'localhost' : host}:${PORT}`);
   if (!cloud && store.dbPath) {
     console.log(`SQLite file: ${store.dbPath}`);
     if (store.settingsKvMeta?.hasOrgId) {

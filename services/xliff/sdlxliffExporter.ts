@@ -178,6 +178,7 @@ function replaceSegAttributes(content: string, segmentMap: Map<string, SdlExport
   const statusToConf: Record<string, string> = {
     draft: '草稿',
     translated: '已翻译',
+    pretranslated: '已翻译',
     approved: 'ApprovedTranslation',
     proofread: 'ApprovedTranslation',
     rejected: 'RejectedTranslation',

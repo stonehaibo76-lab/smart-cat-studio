@@ -1,0 +1,10 @@
+{
+  "productVersion": "1.8.0",
+  "nodeVersion": "22.16.0",
+  "nodeUrl": "https://nodejs.org/dist/v22.16.0/node-v22.16.0-win-x64.zip",
+  "pythonVersion": "3.11.9",
+  "pythonEmbedUrl": "https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip",
+  "getPipUrl": "https://bootstrap.pypa.io/get-pip.py",
+  "stagingFolderName": "Smart-CAT-Studio-1.8.0-portable",
+  "zipFileName": "Smart-CAT-Studio-1.8.0-portable-win64.zip"
+}

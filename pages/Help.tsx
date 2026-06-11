@@ -114,12 +114,12 @@ const OverviewSection = () => {
           <FeatureCard
             icon={Icons.Sparkles}
             title="AI 智能翻译"
-            description="集成 Google Gemini、DeepSeek 等 AI 模型，提供智能翻译建议和优化。"
+            description="集成 Google Gemini、DeepSeek、本地 llama.cpp 等 AI 模型，提供智能翻译建议和优化。"
           />
           <FeatureCard
             icon={Icons.File}
             title="多格式支持"
-            description="项目可导入 TXT、DOCX、Excel、SDLXLIFF、MQXLIFF、SDLPPX/SDLRPX；导出 Excel、TMX，以及可回写 Trados/memoQ 的双语 XLIFF。"
+            description="项目可导入 TXT、DOCX、Excel、SDLXLIFF、MQXLIFF、SDLPPX/SDLRPX；导出 Excel、TMX、原文格式（单语 .docx/.txt/.html），以及可回写 Trados/memoQ 的双语 XLIFF。"
           />
           <FeatureCard
             icon={Icons.Brain}
@@ -130,6 +130,11 @@ const OverviewSection = () => {
             icon={Icons.Sparkles}
             title="翻译知识库"
             description="收录风格指南与背景材料等长文资料，按句段自动检索相关片段，为 AI 与孪生译员提供上下文。"
+          />
+          <FeatureCard
+            icon={Icons.File}
+            title="DOCX 格式保留"
+            description="导入 Word 时保留加粗、斜体、颜色、高亮、上下标、删除线等 run 级样式；编辑器 WYSIWYG 显示，导出写回原文件版式。"
           />
           <FeatureCard
             icon={Icons.MessageSquare}
@@ -209,19 +214,27 @@ const WhatsNewSection = () => {
           <Icons.Lightbulb className="w-6 h-6" />
         </div>
         <div>
-          <h3 className="text-lg font-bold text-slate-900 mb-3">帮助与版本信息</h3>
+          <h3 className="text-lg font-bold text-slate-900 mb-3">V1.8.0 · DOCX 格式保留</h3>
           <ul className="space-y-2 text-slate-700 text-sm">
             <li className="flex gap-2">
               <Icons.Check className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
-              <span>新增「更新说明」栏目，集中查阅版本摘要；侧栏副标题与「应用简介」中的版本号统一为 <strong className="text-slate-900">{APP_DISPLAY_VERSION}</strong>。</span>
+              <span><strong className="text-slate-900">原文格式（单语）导出</strong>：在原 DOCX / TXT / HTML 上写回译文，保留标题、表格、文本框及 run 级字符样式；多文件打包为 ZIP，文件名含导出时间戳。</span>
             </li>
             <li className="flex gap-2">
               <Icons.Check className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
-              <span><strong className="text-slate-900">{APP_DISPLAY_VERSION}</strong>：编辑器「查找与替换」支持正则及 <code className="bg-white/80 px-1 rounded">$1</code> 等替换模板；{cloud ? '云端 PostgreSQL 与本地 SQLite 均在' : '本地 SQLite 在'} <code className="bg-white/80 px-1 rounded">documents</code> 表含 <code className="bg-white/80 px-1 rounded">org_id</code> 时读写兼容。</span>
+              <span><strong className="text-slate-900">WYSIWYG 编辑</strong>：带格式的句段在编辑器中近似 Word 显示；译文可所见即所得编辑，内部以标签串保存以便回写。</span>
             </li>
             <li className="flex gap-2">
               <Icons.Check className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
-              <span>浏览器窗口标题、主导航角标、欢迎页与 TMX 导出头信息中的工具版本已与当前发行版对齐，便于环境与交付物溯源。</span>
+              <span><strong className="text-slate-900">复制原文格式</strong>：在译文中选中文字 → 按住 <kbd className="bg-white/80 px-1 rounded text-xs">Ctrl</kbd> → 点击原文中带格式的片段，将该 run 样式应用到选区（可多次叠加不同样式）。</span>
+            </li>
+            <li className="flex gap-2">
+              <Icons.Check className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
+              <span><strong className="text-slate-900">标签 QA</strong>：编辑带 inline 标签的 DOCX / SDL 句段时，若译文标签数量与原文不一致会提示警告，便于导出前自查。</span>
+            </li>
+            <li className="flex gap-2">
+              <Icons.Check className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
+              <span>导入时自动保存原文件副本；需 <strong className="text-slate-900">Okapi 侧车</strong>（8090）运行。使用根目录 <code className="bg-white/80 px-1 rounded">启动Smart CAT Studio V1.8.0.bat</code> 可一并启动。</span>
             </li>
           </ul>
         </div>
@@ -229,6 +242,17 @@ const WhatsNewSection = () => {
     </div>
 
     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+      <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm md:col-span-2">
+        <h3 className="text-xl font-bold text-slate-900 mb-4 flex items-center gap-2">
+          <Icons.File className="w-5 h-5 text-indigo-600" />
+          DOCX 格式保留（{APP_DISPLAY_VERSION}）
+        </h3>
+        <ul className="space-y-2 text-slate-600 text-sm">
+          <li>• 支持 run 级样式：加粗、斜体、下划线、删除线、字体颜色、高亮、上标、下标；段落级删除线等也会继承识别。</li>
+          <li>• 导出时选择「原文格式（单语）」；单文件直接下载，多文件打包为 <code className="bg-slate-50 px-1 rounded">项目原文格式导出_YYYYMMDD_HHmmss.zip</code>。</li>
+          <li>• 若提示缺少原文件备份，请重新导入该 DOCX（导入时会自动保存原文件）。详细操作见「翻译编辑 → DOCX 格式保留」。</li>
+        </ul>
+      </div>
       <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">
         <h3 className="text-xl font-bold text-slate-900 mb-4 flex items-center gap-2">
           <Icons.Database className="w-5 h-5 text-blue-600" />
@@ -272,7 +296,7 @@ const WhatsNewSection = () => {
               : '项目与资源统一由本机 SQLite 持久化；「本地数据」面板可查看路径、导出备份与恢复。'}
           </li>
           <li>
-            • AI 引擎（Gemini / DeepSeek 等）、快捷按钮与编辑器偏好均写入{cloud ? '云端' : '同一本地后端'}，{cloud ? '换设备登录同一账号即可同步。' : '换机请先备份数据库文件。'}
+            • AI 引擎（Gemini / DeepSeek / 本地 LLM 等）、快捷按钮与编辑器偏好均写入{cloud ? '云端' : '同一本地后端'}，{cloud ? '换设备登录同一账号即可同步。' : '换机请先备份数据库文件。'}
           </li>
         </ul>
       </div>
@@ -317,7 +341,7 @@ const QuickStartSection = () => (
       <StepCard
         step={2}
         title="导入翻译文件"
-        description="上传需要翻译的文件：TXT、DOCX、Excel（.xlsx / .xls）；Trados 的 .sdlxliff / .sdlppx / .sdlrpx；memoQ 的 .mqxliff。XLIFF 会保留句段 ID 与原始文件以便回写；SDLXLIFF 在编辑器中以 <标签ID> 形式显示内联标记。"
+        description="上传需要翻译的文件：TXT、DOCX、Excel（.xlsx / .xls）；Trados 的 .sdlxliff / .sdlppx / .sdlrpx；memoQ 的 .mqxliff。DOCX 导入时会保存原文件并提取 run 级格式；XLIFF 会保留句段 ID 以便回写；SDLXLIFF 在编辑器中以 <标签ID> 形式显示内联标记。"
         icon={Icons.Upload}
       />
       <StepCard
@@ -335,7 +359,7 @@ const QuickStartSection = () => (
       <StepCard
         step={5}
         title="导出翻译结果"
-        description="翻译完成后可导出 Excel、TMX；XLIFF 项目可导出 SDLXLIFF / MQXLIFF 或 SDLRPX 回传包，写回后在 Trados Studio / memoQ 中重新打开。"
+        description="翻译完成后可导出 Excel、TMX；XLIFF 项目可导出 SDLXLIFF / MQXLIFF 或 SDLRPX 回传包。DOCX / TXT / HTML 可选「原文格式（单语）」写回译文并保留版式（需 Okapi 侧车）。"
         icon={Icons.Download}
       />
     </div>
@@ -533,6 +557,45 @@ const EditorSection = () => (
             title="复制译文"
             description="快速复制当前译文到剪贴板，方便粘贴使用。"
           />
+        </div>
+      </div>
+
+      <div className="bg-gradient-to-r from-indigo-50 to-blue-50 rounded-2xl p-6 border border-indigo-100">
+        <h3 className="text-xl font-bold text-slate-900 mb-4 flex items-center gap-2">
+          <Icons.File className="w-5 h-5 text-indigo-600" />
+          DOCX 格式保留
+        </h3>
+        <div className="space-y-4 text-slate-600 text-sm leading-relaxed">
+          <p>
+            从 <strong className="text-slate-900">V1.8.0</strong> 起，导入 DOCX 时会解析 Word 的 run 级样式（加粗、斜体、下划线、删除线、颜色、高亮、上标、下标等），
+            原文列以近似 Word 的方式显示；导入同时会在本地保存原文件，供后续「原文格式（单语）」导出写回。
+          </p>
+          <div>
+            <strong className="text-slate-900">复制格式到译文</strong>
+            <ol className="mt-2 space-y-1 list-decimal list-inside">
+              <li>在译文框中选中需要加格式的文字；</li>
+              <li>按住 <kbd className="bg-white px-1.5 py-0.5 rounded border border-indigo-200 text-xs">Ctrl</kbd>，原文中带格式的片段会显示手形光标；</li>
+              <li>点击该片段，即可将其 run 样式应用到译文选区；可对同一译文多次操作以叠加不同片段的样式。</li>
+            </ol>
+          </div>
+          <div>
+            <strong className="text-slate-900">导出</strong>
+            <ul className="mt-2 space-y-1">
+              <li>• 点击右上角「导出」→ 选择「原文格式（单语）」；单文件直接下载，多文件打包为 ZIP。</li>
+              <li>• 需 Okapi 侧车（8090）运行；推荐双击 <code className="bg-white/80 px-1 rounded">启动Smart CAT Studio V1.8.0.bat</code> 一并启动。</li>
+              <li>• 若选项不可用或提示缺少备份，请重新导入该 DOCX。</li>
+            </ul>
+          </div>
+          <div>
+            <strong className="text-slate-900">标签 QA</strong>
+            <p className="mt-1">
+              编辑带 inline 标签的句段时，若译文标签与原文数量不一致，句段下方会出现警告，便于导出前修正。
+              AI 翻译在原文含标签时也会提示保留标签结构。
+            </p>
+          </div>
+          <p className="text-slate-500 text-xs">
+            同一段落内若译文长度与原文差异较大，个别字符级样式位置可能需手动调整；复杂版式（文本框、形状内文字等）以实际 Word 结构为准。
+          </p>
         </div>
       </div>
 
@@ -1406,7 +1469,7 @@ const SettingsSection = () => {
     <div>
       <h2 className="text-3xl font-bold text-slate-900 mb-4">系统设置页面</h2>
       <p className="text-lg text-slate-600">
-        系统设置分为多个面板：AI 引擎、向量检索（知识库 RAG）、{cloud ? '云端数据' : '本地数据（SQLite 路径与备份导入导出）'}、以及 AI 对话快捷按钮。
+        系统设置分为多个面板：AI 引擎、MT 参考、向量检索（知识库 RAG）、{cloud ? '云端数据' : '本地数据（SQLite 路径与备份导入导出）'}、以及 AI 对话快捷按钮。
         {cloud
           ? ' 云端版登录后即可读写项目数据，无需在本机启动数据库服务。'
           : ' 使用前需已启动本地数据服务（见下方说明），否则应用无法读写项目数据。'}
@@ -1433,9 +1496,44 @@ const SettingsSection = () => {
               <p className="text-sm mt-1">国产 AI 模型，性能优秀，特别适合中英翻译。</p>
             </div>
             <div className="p-4 bg-slate-50 rounded-lg">
+              <strong className="text-slate-900">本地 LLM (llama.cpp)：</strong>
+              <p className="text-sm mt-1">
+                在本机运行 llama-server（如千问 GGUF 模型），通过 OpenAI 兼容接口调用。需在设置中填写服务地址（默认
+                {' '}
+                <code className="text-xs bg-slate-200 px-1 rounded">http://127.0.0.1:8080/v1</code>
+                ），并先启动 llama-server 与 Smart-CAT 本地后端（
+                <code className="text-xs bg-slate-200 px-1 rounded">npm run dev:with-db</code>
+                ）。仅适用于本机使用；孪生译员仍走 DeepSeek。
+              </p>
+            </div>
+            <div className="p-4 bg-slate-50 rounded-lg">
               <strong className="text-slate-900">OpenAI：</strong>
               <p className="text-sm mt-1">业界领先的 AI 模型，功能强大（暂未完全支持）。</p>
             </div>
+          </div>
+          <div className="bg-indigo-50 p-4 rounded-lg border border-indigo-200 mt-4">
+            <strong className="text-slate-900">机器翻译参考（translators，独立于 AI 引擎）：</strong>
+            <p className="text-sm mt-1">
+              在「系统设置 → MT 参考」中启用本地 Python sidecar（默认{' '}
+              <code className="text-xs bg-slate-200 px-1 rounded">http://127.0.0.1:8770</code>
+              ）。单引擎对照在编辑页底部「MT 参考」Tab；多引擎对比在编辑页内全屏弹层（设置中勾选「默认使用多引擎对比」，或底部面板点「多引擎对比…」）。
+              打开方式：<strong className="text-slate-800">Ctrl+Shift+M</strong>（译文框内也可用）、标题栏「MT 参考」、或勾选设置里的「句段切换时自动查询」后切换句段（对比模式开弹层，单引擎开底部面板）。
+              快捷键{' '}
+              <kbd className="px-1 py-0.5 bg-white border border-slate-300 rounded text-xs">Ctrl+Shift+M</kbd>
+              。有划选时用划选内容，否则用当前句原文。译文<strong>不会自动写入</strong>，需手动复制或点击「插入译文」（会<strong>清空当前句段译文</strong>后整句写入参考结果）。
+            </p>
+            <p className="text-xs mt-2 text-slate-600">
+              基于开源库{' '}
+              <a
+                href="https://github.com/UlionTse/translators"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-indigo-700 hover:underline"
+              >
+                translators
+              </a>{' '}
+             （UlionTse，GPL-3.0），通过抓取第三方站点实现，稳定性与合规性有限，仅供个人参考对照，不建议商用批量调用。各引擎按场景选用见下方「MT 引擎推荐」。
+            </p>
           </div>
           <div className="bg-blue-50 p-4 rounded-lg border border-blue-200">
             <strong className="text-slate-900">配置 API Key：</strong>
@@ -1444,6 +1542,65 @@ const SettingsSection = () => {
               Google Gemini 的调用密钥由运行环境提供（界面显示为已通过环境变量加载），请按部署说明配置。
             </p>
           </div>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm">
+        <h3 className="text-xl font-bold text-slate-900 mb-4 flex items-center gap-2">
+          <Icons.Globe className="w-5 h-5 text-indigo-600" />
+          MT 引擎推荐
+        </h3>
+        <div className="space-y-4 text-slate-600">
+          <p className="text-sm">
+            当前 MT 参考面板内置经试用的 <strong className="text-slate-900">17 个引擎</strong>，可在编辑页底部切换对照。
+            下列按<strong className="text-slate-900">翻译场景</strong>给出优先顺序；同一原文可多开 2～3 个引擎比对，比只盯一个更可靠。
+            结果仅供参考，专业领域（法律、医学等）仍需人工判断。
+          </p>
+          <div className="space-y-3">
+            <div className="p-4 bg-slate-50 rounded-lg border border-slate-100">
+              <strong className="text-slate-900">日常英译中 / 中译英对照</strong>
+              <ul className="mt-2 space-y-1 text-sm list-disc list-inside">
+                <li>
+                  <strong className="text-slate-800">主看：</strong>有道、云译、搜狗、腾讯交互翻译
+                </li>
+                <li>
+                  <strong className="text-slate-800">备看：</strong>讯飞听见（中文侧）
+                </li>
+              </ul>
+            </div>
+            <div className="p-4 bg-slate-50 rounded-lg border border-slate-100">
+              <strong className="text-slate-900">韩日项目</strong>
+              <p className="mt-2 text-sm">
+                <strong className="text-slate-800">Papago</strong>（韩）；日译中仍建议以有道、云译为主，Papago 作韩日相关句参考。
+              </p>
+            </div>
+            <div className="p-4 bg-slate-50 rounded-lg border border-slate-100">
+              <strong className="text-slate-900">欧语（法德西意等）</strong>
+              <p className="mt-2 text-sm">Reverso、Systran、ModernMT</p>
+            </div>
+            <div className="p-4 bg-slate-50 rounded-lg border border-slate-100">
+              <strong className="text-slate-900">俄乌 / 东欧</strong>
+              <p className="mt-2 text-sm">Yandex</p>
+            </div>
+            <div className="p-4 bg-slate-50 rounded-lg border border-slate-100">
+              <strong className="text-slate-900">区分美式 / 英式、巴葡 / 欧葡等</strong>
+              <p className="mt-2 text-sm">Lingvanex、iTranslate</p>
+            </div>
+            <div className="p-4 bg-slate-50 rounded-lg border border-slate-100">
+              <strong className="text-slate-900">小语种或 Google 不可用时的广覆盖备选</strong>
+              <p className="mt-2 text-sm">Lara、金山/iciba、迅捷</p>
+            </div>
+            <div className="p-4 bg-slate-50 rounded-lg border border-slate-100">
+              <strong className="text-slate-900">多引擎对比</strong>
+              <p className="mt-2 text-sm">
+                在对比弹层中并行对照有道、云译、搜狗等引擎（最多 6 个）；支持预设「日常中英 / 欧语 / 广覆盖」。
+                弹层内每张卡片可单独复制或插入译文；底部栏「复制选中 / 插入选中」作用于当前选中卡片。Esc 或「关闭」退出弹层，不影响对比模式设置。
+              </p>
+            </div>
+          </div>
+          <p className="text-xs text-slate-500">
+            面板中另有 Google、Translate.com 等引擎，可在网络可用时作广语种对照；若某引擎报错，多为网页接口变更或限流，请换同场景下的其它推荐项重试。
+          </p>
         </div>
       </div>
 
@@ -1559,7 +1716,7 @@ const FAQSection = () => {
   const faqs = [
     {
       question: `${APP_DISPLAY_VERSION} 有哪些新内容？`,
-      answer: `请在使用帮助左侧打开「更新说明」查看本版摘要；浏览器标题、欢迎页、TMX 导出元数据与界面版本号已统一为 ${APP_DISPLAY_VERSION}。具体功能说明仍以各专题章节为准。`
+      answer: `${APP_DISPLAY_VERSION} 重点新增 DOCX 格式保留：导入时提取 run 级样式并在编辑器 WYSIWYG 显示；译文可通过 Ctrl+点击原文复制格式；导出可选「原文格式（单语）」写回原 DOCX/TXT/HTML。详见「更新说明」与「翻译编辑 → DOCX 格式保留」。`
     },
     {
       question: "如何开始使用 Smart-CAT Studio？",
@@ -1567,7 +1724,7 @@ const FAQSection = () => {
     },
     {
       question: "支持哪些文件格式？",
-      answer: "新建项目时支持导入 TXT、DOCX 以及 Excel（.xlsx / .xls）：表格至少两列时按「原文 / 译文」拆成句段，单列则每行作为原文句段。导出支持 Excel (.xlsx) 与 TMX；编辑器还可导出质量报告等（以界面为准）。"
+      answer: "新建项目时支持导入 TXT、DOCX 以及 Excel（.xlsx / .xls）：表格至少两列时按「原文 / 译文」拆成句段，单列则每行作为原文句段。DOCX 会保存原文件并提取字符级格式。导出支持 Excel (.xlsx)、TMX、原文格式（单语 .docx/.txt/.html），以及 SDLXLIFF / MQXLIFF / SDLRPX 等 CAT 回写格式。"
     },
     {
       question: "翻译记忆库和术语库有什么区别？",
@@ -1596,8 +1753,8 @@ const FAQSection = () => {
     {
       question: "如何配置 AI 翻译功能？",
       answer: cloud
-        ? "打开「系统设置 → AI 引擎」，选择默认引擎。DeepSeek 需在页面中填写 API Key（保存到云端 PostgreSQL）；Gemini 由运行环境提供密钥（界面提示已通过环境变量加载）。可使用「测试引擎连接」确认配置。"
-        : "打开「系统设置 → AI 引擎」，选择默认引擎。DeepSeek 需在页面中填写 API Key（写入本地 SQLite）；Gemini 由运行环境提供密钥（界面提示已通过环境变量加载）。可使用「测试引擎连接」确认配置。"
+        ? "打开「系统设置 → AI 引擎」，选择默认引擎。DeepSeek 需在页面中填写 API Key（保存到云端 PostgreSQL）；本地 LLM 需先在本机启动 llama-server 并填写服务地址；Gemini 由运行环境提供密钥（界面提示已通过环境变量加载）。可使用「测试引擎连接」确认配置。"
+        : "打开「系统设置 → AI 引擎」，选择默认引擎。DeepSeek 需在页面中填写 API Key（写入本地 SQLite）；本地 LLM 需先启动 llama-server（如 run.bat）并填写 http://127.0.0.1:8080/v1，同时运行 npm run dev:with-db 以启用代理；Gemini 由运行环境提供密钥。可使用「测试引擎连接」确认配置。"
     },
     {
       question: "翻译进度如何计算？",
@@ -1605,7 +1762,7 @@ const FAQSection = () => {
     },
     {
       question: "如何导出翻译结果？",
-      answer: "在翻译编辑页面，点击右上角的'导出'按钮，选择导出格式（Excel 或 TMX），可以选择仅导出已确认的句段或全部句段。"
+      answer: "在翻译编辑页面点击右上角「导出」：可选 Excel、TMX、原文格式（单语）、SDLXLIFF / MQXLIFF / SDLRPX 等（视项目文件类型而定）。原文格式（单语）在原文件上写回译文并保留 Word 版式，需 Okapi 侧车运行且导入时已保存原文件。可勾选「仅导出已确认句段」。"
     },
     {
       question: "能否跨项目复用记忆库和术语库？",

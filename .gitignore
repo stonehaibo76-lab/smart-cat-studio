@@ -11,6 +11,8 @@ node_modules
 data
 dist
 dist-ssr
+release
+.pack-cache
 *.local
 smartcat-db-path.json
 .env

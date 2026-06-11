@@ -1,11 +1,14 @@
 import React, { useState, useRef } from 'react';
 import { Icons } from '../components/ui/Icons';
 import { Project, SegmentStatus, MatchType, TermBase, TranslationMemory, ProjectFile, Segment, DuplicateAnalysisResult, GrammarRuleBook, RegexDictionaryBook } from '../types';
-import mammoth from 'mammoth';
 import { SUPPORTED_LANGUAGES } from '../constants';
 import { shouldAutoLockSegmentAtImport } from '../services/segmentAutoLock';
 import { toDatetimeLocalValue } from '../services/projectDueDate';
 import * as XLSX from 'xlsx';
+import { parseDocxForImport } from '../services/catInterop/bilingualDocxHandler';
+import { newSourceBlobId, saveSourceBlob } from '../services/catInterop/sourceBlobStore';
+import { okapiExtractFile, isOkapiCandidateFile } from '../services/okapiClient';
+import { countBillableChars, normalizeForMatching } from '../utils/textNormalize';
 import {
   parseXliffFile,
   parseTradosPackage,
@@ -18,7 +21,8 @@ type UploadedFilePayload = {
   name: string;
   content: string;
   isExcel?: boolean;
-  segments?: Array<{ source: string; target: string }>;
+  segments?: Array<{ source: string; target: string; okapiTuId?: string; inlineRunMeta?: import('../types').InlineRunStyle[] }>;
+  sourceBlobId?: string;
   isXliff?: boolean;
   xliffProject?: ParsedXliffProject;
 };
@@ -36,8 +40,9 @@ interface DashboardProps {
     fileName: string,
     content: string,
     isExcel?: boolean,
-    excelSegments?: Array<{ source: string; target?: string }>,
-    xliffProject?: ParsedXliffProject
+    excelSegments?: Array<{ source: string; target?: string; okapiTuId?: string; inlineRunMeta?: import('../types').InlineRunStyle[] }>,
+    xliffProject?: ParsedXliffProject,
+    sourceBlobId?: string
   ) => void;
   onDeleteFileFromProject: (projectId: string, fileId: string) => void;
   onDeleteProject: (id: string) => void;
@@ -191,7 +196,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
   // File Management Modal State
   const [isFilesModalOpen, setIsFilesModalOpen] = useState(false);
   const [targetProjectId, setTargetProjectId] = useState<string | null>(null);
-  const [fileToAdd, setFileToAdd] = useState<UploadedFilePayload | null>(null);
+  const [parsingFileName, setParsingFileName] = useState<string | null>(null);
+  const [importFeedback, setImportFeedback] = useState<string | null>(null);
 
   // Project Settings Modal State
   const [isSettingsModalOpen, setIsSettingsModalOpen] = useState(false);
@@ -270,7 +276,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
   
   const handleOpenFilesModal = (projectId: string) => {
       setTargetProjectId(projectId);
-      setFileToAdd(null);
+      setParsingFileName(null);
+      setImportFeedback(null);
       setIsFilesModalOpen(true);
   };
 
@@ -325,8 +332,44 @@ export const Dashboard: React.FC<DashboardProps> = ({
        }
        if (file.name.endsWith('.docx')) {
           const arrayBuffer = await file.arrayBuffer();
-          const result = await mammoth.extractRawText({ arrayBuffer });
-          return { name: file.name, content: result.value };
+          const sourceBlobId = newSourceBlobId();
+          await saveSourceBlob(sourceBlobId, arrayBuffer);
+          const { segments: docxSegments } = await parseDocxForImport(arrayBuffer, file.name);
+          if (docxSegments.length > 0) {
+            return {
+              name: file.name,
+              content: docxSegments.map((s) => s.source).join('\n'),
+              isExcel: true,
+              sourceBlobId,
+              segments: docxSegments.map((s) => ({
+                source: s.source,
+                target: s.target,
+                okapiTuId: s.okapiTuId,
+                inlineRunMeta: s.inlineRunMeta,
+              })),
+            };
+          }
+          return { name: file.name, content: '', sourceBlobId };
+       }
+       if (isOkapiCandidateFile(file.name) && !file.name.endsWith('.docx')) {
+          const arrayBuffer = await file.arrayBuffer();
+          const sourceBlobId = newSourceBlobId();
+          await saveSourceBlob(sourceBlobId, arrayBuffer);
+          const extracted = await okapiExtractFile(file);
+          if (extracted.ok && extracted.segments?.length) {
+            return {
+              name: file.name,
+              content: extracted.segments.map((s) => s.source).join('\n'),
+              isExcel: true,
+              sourceBlobId,
+              segments: extracted.segments.map((s) => ({
+                source: s.source,
+                target: s.target || '',
+                okapiTuId: s.okapiTuId ?? s.id,
+                inlineRunMeta: s.inlineRunMeta,
+              })),
+            };
+          }
        } else if (file.name.endsWith('.xlsx') || file.name.endsWith('.xls')) {
           // 解析Excel文件
           const arrayBuffer = await file.arrayBuffer();
@@ -424,43 +467,39 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
   const handleSingleFileAddChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
-      if (file) {
-          setIsParsing(true);
-          try {
-              const result = await parseFile(file);
-              setFileToAdd(result);
-          } catch(e) {
-              alert("解析失败");
-          } finally {
-              setIsParsing(false);
-          }
-      }
-  };
+      if (!file || !targetProjectId) return;
 
-  const handleConfirmAddFile = () => {
-      if (targetProjectId && fileToAdd) {
+      setImportFeedback(null);
+      setParsingFileName(file.name);
+      setIsParsing(true);
+      try {
+          const result = await parseFile(file);
           onAddFileToProject(
             targetProjectId,
-            fileToAdd.name,
-            fileToAdd.content,
-            fileToAdd.isExcel,
-            fileToAdd.segments,
-            fileToAdd.xliffProject
+            result.name,
+            result.content,
+            result.isExcel,
+            result.segments,
+            result.xliffProject,
+            result.sourceBlobId
           );
-          setFileToAdd(null);
+          setImportFeedback(`已导入「${result.name}」`);
+      } catch {
+          alert('解析失败');
+      } finally {
+          setIsParsing(false);
+          setParsingFileName(null);
+          if (addFileInputRef.current) addFileInputRef.current.value = '';
       }
   };
 
   const handleCloseFilesModal = () => {
-      setFileToAdd(null);
+      setParsingFileName(null);
+      setImportFeedback(null);
       setIsFilesModalOpen(false);
   };
 
   const handleConfirmFilesModal = () => {
-      if (fileToAdd) {
-          if (!confirm('已选择文件尚未点击「添加」，确定关闭吗？')) return;
-          setFileToAdd(null);
-      }
       setIsFilesModalOpen(false);
   };
 
@@ -559,13 +598,15 @@ export const Dashboard: React.FC<DashboardProps> = ({
   };
 
   const analyzeDuplicates = (project: Project, tms: TranslationMemory[]): DuplicateAnalysisResult => {
+      const normalizeKey = (text: string) => normalizeForMatching(text).toLowerCase();
+
       const textToLocations = new Map<string, { segmentId: string; fileId: string; fileName: string; isLocked: boolean; charCount: number }[]>();
-      
+
       project.files.forEach(file => {
           file.segments.forEach(segment => {
-              const normalizedText = segment.sourceText.trim().toLowerCase();
+              const normalizedText = normalizeKey(segment.sourceText);
               if (!normalizedText) return;
-              
+
               if (!textToLocations.has(normalizedText)) {
                   textToLocations.set(normalizedText, []);
               }
@@ -574,7 +615,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                   fileId: file.id,
                   fileName: file.name,
                   isLocked: segment.isLocked || false,
-                  charCount: segment.sourceText.length
+                  charCount: countBillableChars(segment.sourceText)
               });
           });
       });
@@ -583,7 +624,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
       tms.forEach(tm => {
           if (!project.tmIds.includes(tm.id)) return;
           tm.units.forEach(unit => {
-              const normalizedSource = unit.source.trim().toLowerCase();
+              const normalizedSource = normalizeKey(unit.source);
               if (!tmSourceMap.has(normalizedSource)) {
                   tmSourceMap.set(normalizedSource, { target: unit.target, tmName: tm.name });
               }
@@ -614,14 +655,10 @@ export const Dashboard: React.FC<DashboardProps> = ({
           tmMatchChars: number;
           uniqueSegments: number;
           uniqueChars: number;
-          internalDuplicateTexts: Set<string>;
-          crossFileDuplicateTexts: Set<string>;
-          tmMatchedTexts: Set<string>;
-          segments: Array<{ sourceText: string }>;
       }>();
 
       project.files.forEach(file => {
-          const fileTotalChars = file.segments.reduce((acc, s) => acc + s.sourceText.length, 0);
+          const fileTotalChars = file.segments.reduce((acc, s) => acc + countBillableChars(s.sourceText), 0);
           fileStatsMap.set(file.id, {
               fileId: file.id,
               fileName: file.name,
@@ -634,21 +671,16 @@ export const Dashboard: React.FC<DashboardProps> = ({
               tmExactMatches: 0,
               tmMatchChars: 0,
               uniqueSegments: 0,
-              uniqueChars: 0,
-              internalDuplicateTexts: new Set(),
-              crossFileDuplicateTexts: new Set(),
-              tmMatchedTexts: new Set(),
-              segments: file.segments.map(s => ({ sourceText: s.sourceText }))
+              uniqueChars: 0
           });
           totalSegments += file.segments.length;
           totalChars += fileTotalChars;
       });
 
-      textToLocations.forEach((locations, normalizedText) => {
+      textToLocations.forEach((locations) => {
           if (locations.length > 1) {
               duplicateGroups.push({
-                  sourceText: locations[0].fileName !== '' ? 
-                      project.files.find(f => f.id === locations[0].fileId)?.segments.find(s => s.id === locations[0].segmentId)?.sourceText || '' : '',
+                  sourceText: project.files.find(f => f.id === locations[0].fileId)?.segments.find(s => s.id === locations[0].segmentId)?.sourceText || '',
                   occurrences: locations.map(l => ({
                       segmentId: l.segmentId,
                       fileId: l.fileId,
@@ -656,54 +688,36 @@ export const Dashboard: React.FC<DashboardProps> = ({
                       isLocked: l.isLocked
                   }))
               });
-
-              const fileIdsInvolved = new Set(locations.map(l => l.fileId));
-              const isCrossFile = fileIdsInvolved.size > 1;
-
-              locations.forEach((loc, index) => {
-                  if (index > 0) {
-                      duplicateSegments++;
-                      duplicateChars += loc.charCount;
-                  }
-
-                  const stats = fileStatsMap.get(loc.fileId);
-                  if (stats) {
-                      if (isCrossFile) {
-                          stats.crossFileDuplicateTexts.add(normalizedText);
-                          if (index > 0) {
-                              stats.crossFileDuplicateChars += loc.charCount;
-                          }
-                      } else {
-                          stats.internalDuplicateTexts.add(normalizedText);
-                          if (index > 0) {
-                              stats.internalDuplicateChars += loc.charCount;
-                          }
-                      }
-                  }
-              });
-
-              if (isCrossFile) {
-                  crossFileDuplicates += locations.length - 1;
-              } else {
-                  internalDuplicates += locations.length - 1;
-              }
           }
       });
+
+      // 译马网口径：按文件独立计新字；仅扣减「文件内第 2 次及以后」重复与 TM 匹配。
+      // 跨文件重复仅作参考，不从新字中扣除。
+      const projectTextCounts = new Map<string, number>();
 
       project.files.forEach(file => {
           const stats = fileStatsMap.get(file.id);
           if (!stats) return;
-          
+
+          const fileTextCounts = new Map<string, number>();
+
           file.segments.forEach(segment => {
-              const normalizedText = segment.sourceText.trim().toLowerCase();
+              const normalizedText = normalizeKey(segment.sourceText);
               if (!normalizedText) return;
-              
+
+              const charLen = countBillableChars(segment.sourceText);
+              const fileOccurrence = fileTextCounts.get(normalizedText) ?? 0;
+              fileTextCounts.set(normalizedText, fileOccurrence + 1);
+
+              const projectOccurrence = projectTextCounts.get(normalizedText) ?? 0;
+              projectTextCounts.set(normalizedText, projectOccurrence + 1);
+
               const tmMatch = tmSourceMap.get(normalizedText);
               if (tmMatch) {
                   tmExactMatches++;
-                  tmMatchChars += segment.sourceText.length;
-                  stats.tmMatchedTexts.add(normalizedText);
-                  stats.tmMatchChars += segment.sourceText.length;
+                  tmMatchChars += charLen;
+                  stats.tmExactMatches++;
+                  stats.tmMatchChars += charLen;
                   tmMatches.push({
                       segmentId: segment.id,
                       fileId: file.id,
@@ -712,58 +726,32 @@ export const Dashboard: React.FC<DashboardProps> = ({
                       tmTarget: tmMatch.target,
                       tmName: tmMatch.tmName
                   });
+                  return;
+              }
+
+              if (fileOccurrence > 0) {
+                  internalDuplicates++;
+                  duplicateSegments++;
+                  duplicateChars += charLen;
+                  stats.internalDuplicates++;
+                  stats.internalDuplicateChars += charLen;
+                  return;
+              }
+
+              stats.uniqueSegments++;
+              stats.uniqueChars += charLen;
+
+              if (projectOccurrence > 0) {
+                  crossFileDuplicates++;
+                  stats.crossFileDuplicates++;
+                  stats.crossFileDuplicateChars += charLen;
               }
           });
       });
 
-      const fileStats = Array.from(fileStatsMap.values()).map(stats => {
-          const internalDupCount = stats.internalDuplicateTexts.size;
-          const crossFileDupCount = stats.crossFileDuplicateTexts.size;
-          const tmMatchCount = stats.tmMatchedTexts.size;
+      const fileStats = Array.from(fileStatsMap.values());
 
-          // 计算唯一句段数：总句段 - 文件内重复次数 - 跨文件重复次数 - TM匹配次数
-          const uniqueSegmentCount = stats.totalSegments - internalDupCount - crossFileDupCount - tmMatchCount;
-
-          // 使用互斥逻辑计算各类别的字数（每个句段只属于一个类别）
-          // 优先级：跨文件重复 > TM匹配 > 文件内重复 > 新字
-          let internalDupCharCount = 0;
-          let crossFileDupCharCount = 0;
-          let tmMatchCharCount = 0;
-          let uniqueCharCount = 0;
-
-          stats.segments.forEach(segment => {
-              const normalizedText = segment.sourceText.trim().toLowerCase();
-              const charLen = segment.sourceText.length;
-
-              // 按优先级检查并归类
-              if (stats.crossFileDuplicateTexts.has(normalizedText)) {
-                  crossFileDupCharCount += charLen;
-              } else if (stats.tmMatchedTexts.has(normalizedText)) {
-                  tmMatchCharCount += charLen;
-              } else if (stats.internalDuplicateTexts.has(normalizedText)) {
-                  internalDupCharCount += charLen;
-              } else {
-                  uniqueCharCount += charLen;
-              }
-          });
-
-          return {
-              fileId: stats.fileId,
-              fileName: stats.fileName,
-              totalSegments: stats.totalSegments,
-              totalChars: stats.totalChars,
-              internalDuplicates: internalDupCount,
-              internalDuplicateChars: internalDupCharCount,
-              crossFileDuplicates: crossFileDupCount,
-              crossFileDuplicateChars: crossFileDupCharCount,
-              tmExactMatches: tmMatchCount,
-              tmMatchChars: tmMatchCharCount,
-              uniqueSegments: uniqueSegmentCount,
-              uniqueChars: uniqueCharCount
-          };
-      });
-
-      const uniqueSegments = totalSegments - duplicateSegments;
+      const uniqueSegments = totalSegments - duplicateSegments - tmExactMatches;
       const duplicateRate = totalSegments > 0 ? Math.round((duplicateSegments / totalSegments) * 100) : 0;
       const duplicateCharRate = totalChars > 0 ? Math.round((duplicateChars / totalChars) * 100) : 0;
       const tmMatchRate = totalSegments > 0 ? Math.round((tmExactMatches / totalSegments) * 100) : 0;
@@ -1103,7 +1091,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
                     targetText: targetText,
                     status: status,
                     matchType: MatchType.None,
-                    isLocked: isLocked
+                    isLocked: isLocked,
+                    okapiTuId: item.okapiTuId ?? `p-${index}`,
+                    inlineRunMeta: item.inlineRunMeta,
                 };
             });
         } else {
@@ -1140,7 +1130,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
             name: file.name,
             segments: segs,
             totalSegments: segs.length,
-            progress: initialProgress
+            progress: initialProgress,
+            sourceBlobId: file.sourceBlobId,
         };
     });
 
@@ -1599,7 +1590,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                             </span>
                             <input
                                 type="file"
-                                accept=".txt,.docx,.xlsx,.xls,.sdlxliff,.mqxliff,.sdlppx,.sdlrpx,.xlf"
+                                accept=".txt,.docx,.xlsx,.xls,.html,.htm,.idml,.sdlxliff,.mqxliff,.sdlppx,.sdlrpx,.xlf"
                                 ref={fileInputRef}
                                 onChange={handleFileChange}
                                 className="hidden"
@@ -1702,45 +1693,36 @@ export const Dashboard: React.FC<DashboardProps> = ({
                     {/* Add New File Section */}
                     <div className="shrink-0 border-t border-slate-100 pt-4">
                         <h3 className="text-xs font-bold text-slate-500 uppercase mb-2">上传新文件</h3>
-                        <div className="flex gap-3 items-start">
-                            <div 
-                                className={`flex-1 border-2 border-dashed rounded-xl p-4 flex flex-col items-center justify-center cursor-pointer transition-colors ${
-                                    isParsing ? 'bg-slate-50 border-blue-400 cursor-wait' : 'border-slate-300 hover:bg-slate-50 hover:border-blue-400'
-                                }`}
-                                onClick={() => !isParsing && addFileInputRef.current?.click()}
-                            >
-                                {isParsing ? (
-                                    <Icons.Refresh className="w-5 h-5 mb-1 text-blue-500 animate-spin" />
+                        <div
+                            className={`border-2 border-dashed rounded-xl p-4 flex flex-col items-center justify-center cursor-pointer transition-colors ${
+                                isParsing ? 'bg-slate-50 border-blue-400 cursor-wait' : 'border-slate-300 hover:bg-slate-50 hover:border-blue-400'
+                            }`}
+                            onClick={() => !isParsing && addFileInputRef.current?.click()}
+                        >
+                            {isParsing ? (
+                                <Icons.Refresh className="w-5 h-5 mb-1 text-blue-500 animate-spin" />
+                            ) : (
+                                <Icons.Upload className="w-5 h-5 mb-1 text-slate-400" />
+                            )}
+                            <span className="text-xs text-slate-500 text-center truncate max-w-full px-2">
+                                {isParsing && parsingFileName ? (
+                                    <span className="text-blue-700 font-medium">正在导入 {parsingFileName}…</span>
                                 ) : (
-                                    <Icons.Upload className="w-5 h-5 mb-1 text-slate-400" />
+                                    '点击上传（含 XLIFF / SDLPPX）'
                                 )}
-                                <span className="text-xs text-slate-500 text-center truncate max-w-[200px]">
-                                    {fileToAdd ? (
-                                        <span className="text-slate-900 font-bold">{fileToAdd.name}</span>
-                                    ) : (
-                                        "点击上传（含 XLIFF / SDLPPX）"
-                                    )}
-                                </span>
-                                <input
-                                    type="file"
-                                    accept=".txt,.docx,.xlsx,.xls,.sdlxliff,.mqxliff,.sdlppx,.sdlrpx,.xlf"
-                                    ref={addFileInputRef}
-                                    onChange={handleSingleFileAddChange}
-                                    className="hidden"
-                                />
-                            </div>
-                            <button 
-                                onClick={handleConfirmAddFile}
-                                disabled={!fileToAdd}
-                                className="h-full px-5 bg-blue-600 text-white rounded-xl font-bold text-sm shadow-md hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-                            >
-                                <Icons.Plus className="w-4 h-4" />
-                                添加
-                            </button>
+                            </span>
+                            <input
+                                type="file"
+                                accept=".txt,.docx,.xlsx,.xls,.html,.htm,.idml,.sdlxliff,.mqxliff,.sdlppx,.sdlrpx,.xlf"
+                                ref={addFileInputRef}
+                                onChange={handleSingleFileAddChange}
+                                className="hidden"
+                            />
                         </div>
-                        {fileToAdd && (
+                        {importFeedback && (
                             <p className="text-[10px] text-green-600 mt-2 flex items-center gap-1">
-                                <Icons.Check className="w-3 h-3"/> 已准备好，点击添加以导入。
+                                <Icons.Check className="w-3 h-3" />
+                                {importFeedback}
                             </p>
                         )}
                         <p className="text-[10px] text-slate-400 mt-2">新导入文件将自动执行锁重与非译元素锁定。</p>

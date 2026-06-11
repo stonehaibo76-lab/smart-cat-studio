@@ -1,9 +1,9 @@
 import { Project, SegmentStatus, MatchType, TermBase, TranslationMemory, ProjectFile, EditorQuickSymbol } from './types';
 
 /** 界面与帮助文档中统一展示的发行版标签（含 V 前缀） */
-export const APP_DISPLAY_VERSION = 'V1.7.7.7';
+export const APP_DISPLAY_VERSION = 'V1.8.0';
 /** TMX creationtoolversion 等元数据（不含 V） */
-export const APP_VERSION_METADATA = '1.7.7.7';
+export const APP_VERSION_METADATA = '1.8.0';
 
 /** 术语库/记忆库无创建日期时的侧栏展示 */
 export const RESOURCE_CREATED_DATE_FALLBACK_CN = '2026年4月24日';
@@ -43,6 +43,99 @@ export const DEEPSEEK_MODEL_OPTIONS: ReadonlyArray<{ value: string; label: strin
   { value: 'deepseek-v4-flash', label: 'DeepSeek V4 Flash' },
   { value: 'deepseek-v4-pro', label: 'DeepSeek V4 Pro' }
 ];
+
+/** 机器翻译参考 sidecar 默认地址 */
+export const DEFAULT_MT_REFERENCE_SERVICE_URL = 'http://127.0.0.1:8770';
+
+/** translators 库引擎目录版本（升级时仅自动启用新增引擎） */
+export const MT_TRANSLATOR_CATALOG_VERSION = 3;
+/** v1 仅暴露的 7 个引擎（用于设置迁移） */
+export const MT_TRANSLATOR_CATALOG_V1 = [
+  'bing',
+  'baidu',
+  'youdao',
+  'deepl',
+  'caiyun',
+  'google',
+  'sogou',
+] as const;
+/** v2 曾暴露的全部 39 个引擎（用于设置迁移） */
+export const MT_TRANSLATOR_CATALOG_V2 = [
+  'alibaba', 'apertium', 'argos', 'baidu', 'bing', 'caiyun', 'cloudTranslation', 'deepl', 'elia',
+  'google', 'hujiang', 'iciba', 'iflytek', 'iflyrec', 'itranslate', 'judic', 'languageWire', 'lara',
+  'lingvanex', 'niutrans', 'mglip', 'mirai', 'modernMt', 'myMemory', 'papago', 'qqFanyi', 'qqTranSmart',
+  'reverso', 'sogou', 'sysTran', 'tilde', 'translateCom', 'translateMe', 'utibet', 'volcEngine', 'xunjie',
+  'yandex', 'yeekit', 'youdao',
+] as const;
+
+/** 编辑器 MT 参考暴露的引擎（经试用筛选的 17 个） */
+export const MT_TRANSLATOR_OPTIONS: ReadonlyArray<{
+  id: string;
+  label: string;
+  description: string;
+}> = [
+  { id: 'cloudTranslation', label: '云译', description: '厦大云译，28 语种' },
+  { id: 'google', label: 'Google', description: '134 语种，国内常不可用' },
+  { id: 'iciba', label: '金山/iciba', description: '187 语种' },
+  { id: 'iflyrec', label: '讯飞听见', description: '12 语种' },
+  { id: 'itranslate', label: 'iTranslate', description: '101 语种' },
+  { id: 'lara', label: 'Lara', description: '211 语种' },
+  { id: 'lingvanex', label: 'Lingvanex', description: '112 语种' },
+  { id: 'modernMt', label: 'ModernMT', description: '开源，200 语种' },
+  { id: 'papago', label: 'Papago', description: '韩语向，15 语种' },
+  { id: 'qqTranSmart', label: '腾讯交互翻译', description: '22 语种' },
+  { id: 'reverso', label: 'Reverso', description: '42 语种' },
+  { id: 'sogou', label: '搜狗', description: '20 语种' },
+  { id: 'sysTran', label: 'Systran', description: '52 语种' },
+  { id: 'translateCom', label: 'Translate.com', description: '21 语种' },
+  { id: 'xunjie', label: '迅捷', description: '68 语种' },
+  { id: 'yandex', label: 'Yandex', description: '102 语种' },
+  { id: 'youdao', label: '有道', description: '12 语种，中文较稳' },
+];
+
+export const MT_TRANSLATOR_IDS = MT_TRANSLATOR_OPTIONS.map((o) => o.id);
+
+/** 多引擎对比：单次最多并行查询数 */
+export const MT_COMPARE_MAX = 6;
+
+/** 多引擎对比预设（与帮助「MT 引擎推荐」一致） */
+export const MT_COMPARE_PRESETS: ReadonlyArray<{
+  id: string;
+  label: string;
+  translators: readonly string[];
+}> = [
+  {
+    id: 'zh-en-daily',
+    label: '日常中英',
+    translators: ['youdao', 'cloudTranslation', 'sogou', 'qqTranSmart'],
+  },
+  {
+    id: 'zh-en-extra',
+    label: '中英+备看',
+    translators: ['youdao', 'cloudTranslation', 'sogou', 'qqTranSmart', 'iflyrec'],
+  },
+  {
+    id: 'european',
+    label: '欧语',
+    translators: ['reverso', 'sysTran', 'modernMt'],
+  },
+  {
+    id: 'broad',
+    label: '广覆盖',
+    translators: ['lara', 'iciba', 'xunjie'],
+  },
+];
+
+export const DEFAULT_MT_COMPARE_TRANSLATORS = MT_COMPARE_PRESETS[0].translators;
+
+export function mtTranslatorLabel(id: string): string {
+  return MT_TRANSLATOR_OPTIONS.find((o) => o.id === id)?.label ?? id;
+}
+
+/** 本地 llama-server 默认 OpenAI 兼容根地址 */
+export const DEFAULT_LOCAL_LLM_BASE_URL = 'http://127.0.0.1:8080/v1';
+/** 单模型加载时 llama-server 会忽略 model 字段，占位即可 */
+export const DEFAULT_LOCAL_LLM_MODEL = 'qwen-local';
 
 // Mock Databases (Files)
 export const MOCK_TBS: TermBase[] = [

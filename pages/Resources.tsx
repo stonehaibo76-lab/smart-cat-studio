@@ -4,8 +4,9 @@ import { TermBase, TranslationMemory, TermBaseEntry, TranslationMemoryUnit, Gram
 import { GrammarRuleBooksPanel, createEmptyGrammarRuleBook } from '../components/GrammarRuleBooksPanel';
 import { RegexDictionaryPanel, createEmptyRegexDictionaryBook } from '../components/RegexDictionaryPanel';
 import * as XLSX from 'xlsx';
-import { SUPPORTED_LANGUAGES, formatResourceCreatedDateLabel } from '../constants';
+import { parseTmxFile } from '../services/tmxImport';
 import { isCloudDeployment } from '../services/deploymentMode';
+import { formatResourceCreatedDateLabel } from '../constants';
 
 interface ResourcesProps {
   termBases: TermBase[];
@@ -433,8 +434,9 @@ export const Resources: React.FC<ResourcesProps> = ({
       }
 
       const isExcel = file.name.endsWith('.xlsx') || file.name.endsWith('.xls');
-      if (!isExcel) {
-          alert("仅支持 Excel (.xlsx, .xls) 格式文件导入。");
+      const isTmx = file.name.toLowerCase().endsWith('.tmx');
+      if (!isExcel && !isTmx) {
+          alert("支持 Excel (.xlsx, .xls) 或 TMX (.tmx) 格式文件导入。");
           return;
       }
 
@@ -464,7 +466,17 @@ export const Resources: React.FC<ResourcesProps> = ({
               }
           }
 
-          // Read and parse Excel file
+          // Read and parse file
+          let parsedEntries: { source: string; target: string }[] = [];
+
+          if (importFile.name.toLowerCase().endsWith('.tmx')) {
+              if (activeTab !== 'tm') {
+                  alert('TMX 文件只能导入到翻译记忆库');
+                  return;
+              }
+              const tmx = await parseTmxFile(importFile);
+              parsedEntries = tmx.units.map((u) => ({ source: u.source, target: u.target }));
+          } else {
           const data = await importFile.arrayBuffer();
           const workbook = XLSX.read(data, { type: 'array' });
           const firstSheetName = workbook.SheetNames[0];
@@ -474,7 +486,7 @@ export const Resources: React.FC<ResourcesProps> = ({
           const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as any[][];
 
           // Map data (Assume Col A is Source, Col B is Target)
-          const parsedEntries = jsonData.map((row, index) => {
+          parsedEntries = jsonData.map((row, index) => {
               if (!row || row.length < 2) return null;
               
               const s = String(row[0] || '').trim();
@@ -491,6 +503,7 @@ export const Resources: React.FC<ResourcesProps> = ({
               if (!s || !t) return null;
               return { source: s, target: t };
           }).filter((item): item is { source: string, target: string } => item !== null);
+          }
 
           setImportProgress(30);
 
@@ -854,7 +867,7 @@ export const Resources: React.FC<ResourcesProps> = ({
                     >
                         <Icons.Upload className="w-4 h-4 text-slate-600" />
                         导入
-                        <input type="file" className="hidden" accept=".xlsx,.xls,.json,.txt" onChange={handleImportFile} />
+                        <input type="file" className="hidden" accept=".xlsx,.xls,.tmx,.json,.txt" onChange={handleImportFile} />
                     </label>
                     <button onClick={handleExportFile} className="flex items-center gap-2 px-3 py-2 border border-slate-200 rounded-lg hover:bg-slate-50 text-sm font-medium text-slate-700" title="导出当前库">
                         <Icons.Download className="w-4 h-4 text-slate-600"/> 导出

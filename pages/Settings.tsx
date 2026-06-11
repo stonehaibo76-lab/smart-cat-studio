@@ -7,9 +7,12 @@ import {
   CustomOnlineDictionary,
   EmbeddingSettings,
   PerformanceSettings,
+  MtReferenceSettings,
 } from '../types';
 import { isValidCustomDictionaryHomeUrl } from '../services/onlineDictionaryUrls';
 import { checkEmbeddingHealth } from '../services/embeddingClient';
+import { checkMtReferenceHealth, checkMtSidecarDirect } from '../services/mtReferenceClient';
+import { requestStartLocalMtReferenceService } from '../services/devMtReferenceLauncher';
 import { requestStartLocalEmbeddingService } from '../services/devEmbeddingLauncher';
 import { testAIConnection } from '../services/geminiService';
 import {
@@ -19,13 +22,15 @@ import {
   importLocalDatabaseFile,
   type LocalDataStoreInfo,
 } from '../services/localBackendClient';
-import { DEEPSEEK_MODEL_OPTIONS } from '../constants';
+import { DEEPSEEK_MODEL_OPTIONS, DEFAULT_LOCAL_LLM_BASE_URL, DEFAULT_LOCAL_LLM_MODEL, MT_TRANSLATOR_IDS, MT_TRANSLATOR_OPTIONS } from '../constants';
 import { isCloudDeployment, saveSettingsHint, savedToDatabaseMessage } from '../services/deploymentMode';
+import { isPortablePackage } from '../utils/packageProfile';
 
 export type SettingsPanelId =
   | 'ai'
   | 'translation'
   | 'embedding'
+  | 'mtReference'
   | 'performance'
   | 'localDb'
   | 'quickPrompts'
@@ -46,6 +51,8 @@ interface SettingsPageProps {
     onSaveCustomOnlineDictionaries: () => Promise<void>;
     embeddingSettings: EmbeddingSettings;
     onUpdateEmbeddingSettings: (s: EmbeddingSettings) => void;
+    mtReferenceSettings: MtReferenceSettings;
+    onUpdateMtReferenceSettings: (s: MtReferenceSettings) => void;
     performanceSettings: PerformanceSettings;
     onUpdatePerformanceSettings: (s: PerformanceSettings) => void;
     /** 中译外：译文编辑区首字母自动大写 */
@@ -85,6 +92,14 @@ const SETTINGS_PANELS: {
     subtitle: '本地 RAG / 知识库',
     icon: Icons.BrainCircuit,
     activeClass: 'border-teal-400 bg-teal-50 text-teal-900 ring-2 ring-teal-400/30',
+    idleClass: 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50'
+  },
+  {
+    id: 'mtReference',
+    title: 'MT 参考',
+    subtitle: 'translators 对照',
+    icon: Icons.Languages,
+    activeClass: 'border-indigo-400 bg-indigo-50 text-indigo-900 ring-2 ring-indigo-400/30',
     idleClass: 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50'
   },
   {
@@ -129,23 +144,41 @@ const SETTINGS_PANELS: {
   }
 ];
 
-export const SettingsPage: React.FC<SettingsPageProps> = ({ 
+function getVisibleSettingsPanels() {
+  if (!isPortablePackage()) return SETTINGS_PANELS;
+  return SETTINGS_PANELS.filter((p) => p.id !== 'embedding');
+}
+
+export const SettingsPage: React.FC<SettingsPageProps> = ({
     aiSettings, onUpdateAISettings, quickPrompts, onUpdateQuickPrompts,
     favoriteUrls, onUpdateFavoriteUrls, onSaveFavoriteUrls,
     customOnlineDictionaries, onUpdateCustomOnlineDictionaries, onSaveCustomOnlineDictionaries,
     embeddingSettings, onUpdateEmbeddingSettings,
+    mtReferenceSettings, onUpdateMtReferenceSettings,
     performanceSettings, onUpdatePerformanceSettings,
     capitalizeTargetFirstLetterZhOut, onUpdateCapitalizeTargetFirstLetterZhOut,
     initialPanel,
 }) => {
   const cloud = isCloudDeployment();
-  const [activePanel, setActivePanel] = useState<SettingsPanelId>(() => initialPanel ?? 'ai');
+  const visiblePanels = getVisibleSettingsPanels();
+  const [activePanel, setActivePanel] = useState<SettingsPanelId>(() => {
+    const initial = initialPanel ?? 'ai';
+    if (isPortablePackage() && initial === 'embedding') return 'ai';
+    return initial;
+  });
   const [favSaving, setFavSaving] = useState(false);
   const [favSaveHint, setFavSaveHint] = useState<{ ok: boolean; text: string } | null>(null);
   const [dictSaving, setDictSaving] = useState(false);
   const [dictSaveHint, setDictSaveHint] = useState<{ ok: boolean; text: string } | null>(null);
   const [embedTesting, setEmbedTesting] = useState(false);
   const [embedTestMsg, setEmbedTestMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [mtRefTesting, setMtRefTesting] = useState(false);
+  const [mtRefTestMsg, setMtRefTestMsg] = useState<{ ok: boolean; text: string } | null>(null);
+  const [mtRefLaunchBusy, setMtRefLaunchBusy] = useState(false);
+  const [mtRefLaunchHint, setMtRefLaunchHint] = useState<string | null>(null);
+  const [mtRefLaunchLogs, setMtRefLaunchLogs] = useState<string[]>([]);
+  const [mtRefLaunchProgress, setMtRefLaunchProgress] = useState<number | null>(null);
+  const mtRefLogRef = useRef<HTMLPreElement>(null);
   const [embedLaunchBusy, setEmbedLaunchBusy] = useState(false);
   const [embedLaunchHint, setEmbedLaunchHint] = useState<string | null>(null);
   const [embedLaunchLogs, setEmbedLaunchLogs] = useState<string[]>([]);
@@ -302,13 +335,163 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
           text: `连接成功：${r.model ?? '—'}，维度 ${r.dimension ?? '—'}`
         });
       } else {
-        setEmbedTestMsg({ ok: false, text: r.error || '连接失败' });
+        setEmbedTestMsg({ ok: false, text: r.error ?? '连接失败' });
       }
-    } catch (e) {
-      setEmbedTestMsg({ ok: false, text: e instanceof Error ? e.message : String(e) });
     } finally {
       setEmbedTesting(false);
     }
+  };
+
+  useEffect(() => {
+    const el = mtRefLogRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [mtRefLaunchLogs]);
+
+  const appendMtRefLog = (line: string) => {
+    setMtRefLaunchLogs((prev) => {
+      const next = [...prev, line];
+      const max = 400;
+      return next.length > max ? next.slice(-max) : next;
+    });
+  };
+
+  const mtRefStartOptions = {
+    disableStartupPreaccelerate: mtReferenceSettings.disableStartupPreaccelerate === true,
+  };
+
+  const handleStartMtReferenceProcess = async () => {
+    setMtRefLaunchBusy(true);
+    setMtRefLaunchHint(null);
+    setMtRefLaunchLogs([]);
+    setMtRefLaunchProgress(null);
+    try {
+      if (isPortablePackage()) {
+        for (let i = 0; i < 24; i++) {
+          const r = await checkMtReferenceHealth(mtReferenceSettings);
+          if (r.ok) {
+            setMtRefLaunchHint(
+              `MT 参考服务已就绪（${mtReferenceSettings.serviceUrl || 'http://127.0.0.1:8770'}）${
+                r.translatorsVersion ? `，translators ${r.translatorsVersion}` : ''
+              }。已勾选「启用机器翻译参考面板」。`
+            );
+            onUpdateMtReferenceSettings({ ...mtReferenceSettings, enabled: true });
+            return;
+          }
+          if (i === 0) {
+            appendMtRefLog('便携版：正在检测 MT sidecar（8770）…');
+          }
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+        setMtRefLaunchHint(
+          '无法连接 MT 参考服务（8770）。便携版需双击 Start-SmartCAT.bat 启动，并保持控制台窗口打开；不要只打开浏览器访问页面。若仍失败，请查看控制台是否有 Python/MT 报错。'
+        );
+        return;
+      }
+
+      const r = await requestStartLocalMtReferenceService(
+        {
+          onLogLine: appendMtRefLog,
+          onProgress: (pct) => setMtRefLaunchProgress(pct),
+        },
+        mtRefStartOptions
+      );
+      if (!r.ok) {
+        setMtRefLaunchHint(r.error);
+        return;
+      }
+      if (r.alreadyRunning) {
+        setMtRefLaunchProgress(100);
+        setMtRefLaunchHint('检测到 8770 已在运行。可直接「测试连接」。已为你勾选「启用机器翻译参考面板」。');
+      } else {
+        setMtRefLaunchProgress(100);
+        setMtRefLaunchHint(
+          'MT 参考服务已在后台启动（本页显示日志）。首次 pip 安装可能较慢；就绪后请点击「测试连接」。已勾选「启用机器翻译参考面板」。'
+        );
+      }
+      onUpdateMtReferenceSettings({ ...mtReferenceSettings, enabled: true });
+    } finally {
+      setMtRefLaunchBusy(false);
+    }
+  };
+
+  const ensureMtSidecarForTest = async (): Promise<{ ok: boolean; error?: string }> => {
+    const direct = await checkMtSidecarDirect(mtReferenceSettings);
+    if (direct.ok) return { ok: true };
+
+    if (isPortablePackage()) {
+      const viaApi = await checkMtReferenceHealth(mtReferenceSettings);
+      if (viaApi.ok) return { ok: true };
+      return {
+        ok: false,
+        error:
+          viaApi.error ||
+          'MT sidecar 未运行。请关闭后重新双击 Start-SmartCAT.bat，并保持启动窗口打开。',
+      };
+    }
+
+    setMtRefTestMsg({ ok: false, text: 'sidecar 未运行，正在自动启动…' });
+    setMtRefLaunchLogs([]);
+    setMtRefLaunchProgress(null);
+    const start = await requestStartLocalMtReferenceService(
+      {
+        onLogLine: appendMtRefLog,
+        onProgress: (pct) => setMtRefLaunchProgress(pct),
+      },
+      mtRefStartOptions
+    );
+    if (!start.ok) {
+      return { ok: false, error: start.error };
+    }
+    onUpdateMtReferenceSettings({ ...mtReferenceSettings, enabled: true });
+    for (let i = 0; i < 40; i++) {
+      const again = await checkMtSidecarDirect(mtReferenceSettings);
+      if (again.ok) return { ok: true };
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    return { ok: false, error: 'sidecar 启动超时，请查看下方启动日志或手动运行 scripts\\start-mt-reference.cmd' };
+  };
+
+  const runMtReferenceConnectionTest = async () => {
+    const url = mtReferenceSettings.serviceUrl?.trim();
+    if (!url) {
+      setMtRefTestMsg({ ok: false, text: '请先填写 sidecar 地址' });
+      return;
+    }
+    setMtRefTesting(true);
+    setMtRefTestMsg(null);
+    try {
+      const ensured = await ensureMtSidecarForTest();
+      if (!ensured.ok) {
+        setMtRefTestMsg({ ok: false, text: ensured.error ?? '启动 sidecar 失败' });
+        return;
+      }
+      const r = await checkMtReferenceHealth(mtReferenceSettings);
+      if (r.ok) {
+        setMtRefTestMsg({
+          ok: true,
+          text: `连接成功${r.translatorsVersion ? `（translators ${r.translatorsVersion}）` : ''}`,
+        });
+      } else {
+        setMtRefTestMsg({ ok: false, text: r.error ?? '连接失败' });
+      }
+    } finally {
+      setMtRefTesting(false);
+    }
+  };
+
+  const toggleMtTranslatorEnabled = (id: string) => {
+    const set = new Set(mtReferenceSettings.enabledTranslators);
+    if (set.has(id)) {
+      if (set.size <= 1) return;
+      set.delete(id);
+    } else {
+      set.add(id);
+    }
+    onUpdateMtReferenceSettings({
+      ...mtReferenceSettings,
+      enabledTranslators: MT_TRANSLATOR_OPTIONS.filter((o) => set.has(o.id)).map((o) => o.id),
+    });
   };
 
   const runAIConnectionTest = async () => {
@@ -325,11 +508,22 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   };
 
   const handleProviderChange = (provider: string) => {
-      const p = provider === 'Google Gemini' ? 'gemini' : provider === 'DeepSeek' ? 'deepseek' : 'openai';
-      const nextSettings: AISettings = { ...aiSettings, provider: p as any };
+      const p =
+        provider === 'Google Gemini'
+          ? 'gemini'
+          : provider === 'DeepSeek'
+            ? 'deepseek'
+            : provider === '本地 LLM (llama.cpp)'
+              ? 'local'
+              : 'openai';
+      const nextSettings: AISettings = { ...aiSettings, provider: p as AISettings['provider'] };
       if (p === 'deepseek') {
         const hasValidDeepSeekModel = DEEPSEEK_MODEL_OPTIONS.some((m) => m.value === aiSettings.model);
         nextSettings.model = hasValidDeepSeekModel ? aiSettings.model : DEEPSEEK_MODEL_OPTIONS[0].value;
+      }
+      if (p === 'local') {
+        nextSettings.localLlmBaseUrl = aiSettings.localLlmBaseUrl?.trim() || DEFAULT_LOCAL_LLM_BASE_URL;
+        nextSettings.model = aiSettings.model?.trim() || DEFAULT_LOCAL_LLM_MODEL;
       }
       onUpdateAISettings(nextSettings);
   };
@@ -340,7 +534,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
       <p className="text-sm text-slate-500 mb-6">点击下方卡片切换要修改的配置项</p>
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 mb-8">
-        {SETTINGS_PANELS.map(({ id, title, subtitle, icon: Icon, activeClass, idleClass }) => {
+        {visiblePanels.map(({ id, title, subtitle, icon: Icon, activeClass, idleClass }) => {
           const isOn = activePanel === id;
           const panelTitle = id === 'localDb' ? (cloud ? '云端数据' : '本地数据') : title;
           const panelSubtitle =
@@ -385,7 +579,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
             </div>
             <div>
               <h2 className="text-lg font-bold text-slate-900">AI 引擎配置</h2>
-              <p className="text-sm text-slate-500">管理 Gemini、DeepSeek 等模型的连接设置。</p>
+              <p className="text-sm text-slate-500">管理 Gemini、DeepSeek、本地 LLM 等模型的连接设置。</p>
             </div>
           </div>
 
@@ -393,11 +587,12 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
             {/* Default Provider */}
             <div>
               <label className="block text-sm font-semibold text-slate-700 mb-2">默认翻译引擎</label>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 sm:gap-3">
-                {['Google Gemini', 'DeepSeek', 'OpenAI'].map((provider) => {
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 sm:gap-3">
+                {['Google Gemini', 'DeepSeek', 'OpenAI', '本地 LLM (llama.cpp)'].map((provider) => {
                   const isActive = (provider === 'Google Gemini' && aiSettings.provider === 'gemini') || 
                                    (provider === 'DeepSeek' && aiSettings.provider === 'deepseek') ||
-                                   (provider === 'OpenAI' && aiSettings.provider === 'openai');
+                                   (provider === 'OpenAI' && aiSettings.provider === 'openai') ||
+                                   (provider === '本地 LLM (llama.cpp)' && aiSettings.provider === 'local');
                   return (
                     <button 
                       key={provider} 
@@ -458,6 +653,49 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                     <Icons.Lock className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
                 </div>
                 <p className="text-xs text-slate-400 mt-1.5">请输入 DeepSeek 提供的 API Key。我们会自动保存到本地浏览器的 LocalStorage 中。</p>
+                </div>
+            )}
+
+            {aiSettings.provider === 'local' && (
+                <div className="animate-in fade-in slide-in-from-top-2 space-y-4">
+                <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-2">llama-server 服务地址</label>
+                <input
+                  type="text"
+                  placeholder={DEFAULT_LOCAL_LLM_BASE_URL}
+                  value={aiSettings.localLlmBaseUrl || DEFAULT_LOCAL_LLM_BASE_URL}
+                  onChange={(e) => onUpdateAISettings({ ...aiSettings, localLlmBaseUrl: e.target.value })}
+                  className="w-full px-4 py-2.5 rounded-xl border border-slate-300 bg-white text-sm font-mono"
+                />
+                <p className="text-xs text-slate-400 mt-1.5">OpenAI 兼容根地址，须与 run.bat 中 --port 一致（默认 8080，可填 http://127.0.0.1:8080 或带 /v1）。</p>
+                </div>
+                <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-2">模型名（占位）</label>
+                <input
+                  type="text"
+                  placeholder={DEFAULT_LOCAL_LLM_MODEL}
+                  value={aiSettings.model || DEFAULT_LOCAL_LLM_MODEL}
+                  onChange={(e) => onUpdateAISettings({ ...aiSettings, model: e.target.value })}
+                  className="w-full px-4 py-2.5 rounded-xl border border-slate-300 bg-white text-sm font-mono"
+                />
+                <p className="text-xs text-slate-400 mt-1.5">单模型加载时 llama-server 会忽略此字段，任意填写即可。</p>
+                </div>
+                <div>
+                <label className="block text-sm font-semibold text-slate-700 mb-2">API Key（可选）</label>
+                <div className="relative">
+                    <input 
+                    type="password" 
+                    placeholder="留空或 sk-no-key-required" 
+                    value={aiSettings.localLlmApiKey || ''}
+                    onChange={(e) => onUpdateAISettings({ ...aiSettings, localLlmApiKey: e.target.value })}
+                    className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 outline-none transition-all text-sm font-mono"
+                    />
+                    <Icons.Lock className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                </div>
+                </div>
+                <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-xs text-amber-900 leading-relaxed">
+                  使用前请先启动 llama-server（推荐 <code className="font-mono">run-text-only.bat</code>，含 <code className="font-mono">--jinja --reasoning-budget 0</code> 关闭 Qwen 思考模式），并确保 Smart-CAT 本地后端已运行（<code className="font-mono">npm run dev:with-db</code>）。本地 35B 模型单句翻译可能需要 10～60 秒。孪生译员仍使用 DeepSeek。
+                </div>
                 </div>
             )}
             
@@ -533,7 +771,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
         )}
 
         {/* 本地 Embedding / RAG */}
-        {activePanel === 'embedding' && (
+        {activePanel === 'embedding' && !isPortablePackage() && (
         <section className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 lg:p-6 min-w-0 animate-in fade-in duration-200">
           <div className="flex items-center gap-3 mb-6 pb-4 border-b border-slate-100">
             <div className="p-2 bg-teal-100 text-teal-700 rounded-lg">
@@ -701,6 +939,307 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                   className={`text-sm ${embedTestMsg.ok ? 'text-green-700' : 'text-red-600'}`}
                 >
                   {embedTestMsg.text}
+                </span>
+              )}
+            </div>
+          </div>
+        </section>
+        )}
+
+        {activePanel === 'mtReference' && (
+        <section className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 lg:p-6 min-w-0 animate-in fade-in duration-200">
+          <div className="flex items-center gap-3 mb-6 pb-4 border-b border-slate-100">
+            <div className="p-2 bg-indigo-100 text-indigo-800 rounded-lg">
+              <Icons.Languages className="w-5 h-5" />
+            </div>
+            <div>
+              <h2 className="text-lg font-bold text-slate-900">机器翻译参考</h2>
+              <p className="text-sm text-slate-500">
+                通过本地 Python sidecar 调用{' '}
+                <a
+                  href="https://github.com/UlionTse/translators"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-indigo-600 hover:underline"
+                >
+                  translators
+                </a>{' '}
+                库（GPL-3.0），在编辑页对照 Bing / 百度 / DeepL 等结果，仅供参考，不会自动写入译文。
+              </p>
+            </div>
+          </div>
+
+          <div className="space-y-5">
+            <div className="rounded-xl border border-indigo-200 bg-indigo-50/60 p-4 space-y-3">
+              <div className="text-sm font-semibold text-indigo-900">
+                {isPortablePackage() ? 'MT 参考服务（便携版）' : '启动 MT 参考服务'}
+              </div>
+              <p className="text-xs text-indigo-900/90 leading-relaxed">
+                {isPortablePackage() ? (
+                  <>
+                    便携版在双击 <span className="font-mono">Start-SmartCAT.bat</span>{' '}
+                    时会自动启动 MT sidecar（端口 8770）。此处用于检测是否已就绪；若未连接请重新运行启动脚本并保持控制台窗口打开。
+                  </>
+                ) : (
+                  <>
+                    开发模式下由本页后台启动 Python / uvicorn（端口 8770），并在此显示日志；效果与手动运行{' '}
+                    <span className="font-mono">scripts\start-mt-reference.cmd</span> 相同。点击「测试连接」时若
+                    sidecar 未运行也会自动尝试启动。
+                  </>
+                )}
+              </p>
+              {!isPortablePackage() && (
+              <label className="flex items-start gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={mtReferenceSettings.disableStartupPreaccelerate === true}
+                  onChange={(e) =>
+                    onUpdateMtReferenceSettings({
+                      ...mtReferenceSettings,
+                      disableStartupPreaccelerate: e.target.checked,
+                    })
+                  }
+                  disabled={mtRefLaunchBusy || mtRefTesting}
+                  className="mt-0.5 rounded border-indigo-300 text-indigo-600 focus:ring-indigo-500 disabled:opacity-50"
+                />
+                <span className="text-xs text-indigo-900/90 leading-relaxed">
+                  <span className="font-medium text-indigo-900">关闭 MT 启动预热</span>
+                  <span className="block mt-0.5 text-indigo-900/75">
+                    开启后启动时不预加载全部引擎（约 39 个），几秒即可就绪；首次调用某引擎时可能稍慢。修改后需重启
+                    sidecar 才生效。
+                  </span>
+                </span>
+              </label>
+              )}
+              <button
+                type="button"
+                disabled={mtRefLaunchBusy || mtRefTesting}
+                onClick={() => void handleStartMtReferenceProcess()}
+                className="px-4 py-2 text-sm font-medium text-white bg-indigo-700 rounded-xl hover:bg-indigo-800 disabled:opacity-50"
+              >
+                {mtRefLaunchBusy
+                  ? '正在检测…'
+                  : isPortablePackage()
+                    ? '检测 MT 服务'
+                    : '启动 MT 参考服务'}
+              </button>
+              {!isPortablePackage() && (
+              <>
+              {(mtRefLaunchBusy || mtRefTesting) && mtRefLaunchProgress != null && (
+                <div className="space-y-1">
+                  <div className="flex justify-between text-[11px] text-indigo-900/80">
+                    <span>进度</span>
+                    <span>{`${mtRefLaunchProgress}%`}</span>
+                  </div>
+                  <progress
+                    className="w-full h-2 rounded overflow-hidden accent-indigo-600"
+                    value={mtRefLaunchProgress}
+                    max={100}
+                  />
+                </div>
+              )}
+              {(mtRefLaunchBusy || mtRefTesting) && mtRefLaunchProgress == null && mtRefLaunchLogs.length > 0 && (
+                <div className="w-full h-2 rounded bg-indigo-200/80 overflow-hidden">
+                  <div className="h-full w-full bg-indigo-400/50 rounded animate-pulse" />
+                </div>
+              )}
+              {mtRefLaunchLogs.length > 0 && (
+                <div className="rounded-lg border border-indigo-200/80 bg-white/90 overflow-hidden">
+                  <div className="px-2 py-1 text-[10px] font-medium text-indigo-900/70 border-b border-indigo-100 bg-indigo-50/50">
+                    启动日志
+                  </div>
+                  <pre
+                    ref={mtRefLogRef}
+                    className="max-h-52 overflow-auto p-2 text-[11px] leading-snug font-mono text-slate-800 whitespace-pre-wrap break-all"
+                  >
+                    {mtRefLaunchLogs.join('\n')}
+                  </pre>
+                </div>
+              )}
+              </>
+              )}
+              {mtRefLaunchHint && (
+                <p className="text-xs text-slate-700 whitespace-pre-wrap">{mtRefLaunchHint}</p>
+              )}
+            </div>
+
+            <label className="flex items-center gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={mtReferenceSettings.enabled}
+                onChange={(e) =>
+                  onUpdateMtReferenceSettings({ ...mtReferenceSettings, enabled: e.target.checked })
+                }
+                className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500"
+              />
+              <span className="text-sm font-medium text-slate-800">启用机器翻译参考面板</span>
+            </label>
+
+            <div>
+              <label className="block text-sm font-semibold text-slate-700 mb-2">Sidecar 地址</label>
+              <input
+                type="url"
+                placeholder="http://127.0.0.1:8770"
+                value={mtReferenceSettings.serviceUrl}
+                onChange={(e) =>
+                  onUpdateMtReferenceSettings({ ...mtReferenceSettings, serviceUrl: e.target.value })
+                }
+                disabled={!mtReferenceSettings.enabled}
+                className="w-full px-4 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 outline-none transition-all text-sm font-mono disabled:opacity-50"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-semibold text-slate-700 mb-2">
+                API Key（可选，与服务端 MT_REF_API_KEY 一致时填写）
+              </label>
+              <input
+                type="password"
+                placeholder="留空表示无需鉴权"
+                value={mtReferenceSettings.apiKey || ''}
+                onChange={(e) =>
+                  onUpdateMtReferenceSettings({
+                    ...mtReferenceSettings,
+                    apiKey: e.target.value || undefined,
+                  })
+                }
+                disabled={!mtReferenceSettings.enabled}
+                className="w-full px-4 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 outline-none transition-all text-sm font-mono disabled:opacity-50"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-semibold text-slate-700 mb-2">默认参考引擎</label>
+              <select
+                value={mtReferenceSettings.defaultTranslator}
+                onChange={(e) =>
+                  onUpdateMtReferenceSettings({
+                    ...mtReferenceSettings,
+                    defaultTranslator: e.target.value,
+                  })
+                }
+                disabled={!mtReferenceSettings.enabled}
+                className="w-full px-4 py-2.5 rounded-xl border border-slate-300 bg-white text-sm disabled:opacity-50"
+              >
+                {MT_TRANSLATOR_OPTIONS.filter((o) =>
+                  mtReferenceSettings.enabledTranslators.includes(o.id)
+                ).map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.label} — {o.description}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                <label className="block text-sm font-semibold text-slate-700">
+                  编辑器中可用的引擎
+                  <span className="ml-2 text-xs font-normal text-slate-400">
+                    共 {MT_TRANSLATOR_OPTIONS.length} 个，可逐个切换试用
+                  </span>
+                </label>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    disabled={!mtReferenceSettings.enabled}
+                    onClick={() =>
+                      onUpdateMtReferenceSettings({
+                        ...mtReferenceSettings,
+                        enabledTranslators: [...MT_TRANSLATOR_IDS],
+                      })
+                    }
+                    className="rounded-lg px-2.5 py-1 text-xs font-medium border border-slate-300 bg-white text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+                  >
+                    全选
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!mtReferenceSettings.enabled}
+                    onClick={() =>
+                      onUpdateMtReferenceSettings({
+                        ...mtReferenceSettings,
+                        enabledTranslators: [mtReferenceSettings.defaultTranslator],
+                      })
+                    }
+                    className="rounded-lg px-2.5 py-1 text-xs font-medium border border-slate-300 bg-white text-slate-600 hover:bg-slate-50 disabled:opacity-40"
+                  >
+                    仅默认
+                  </button>
+                </div>
+              </div>
+              <div className="max-h-48 overflow-y-auto rounded-xl border border-slate-200 p-2">
+                <div className="flex flex-wrap gap-2">
+                {MT_TRANSLATOR_OPTIONS.map((o) => {
+                  const on = mtReferenceSettings.enabledTranslators.includes(o.id);
+                  return (
+                    <button
+                      key={o.id}
+                      type="button"
+                      disabled={!mtReferenceSettings.enabled}
+                      onClick={() => toggleMtTranslatorEnabled(o.id)}
+                      className={`rounded-lg px-3 py-1.5 text-xs font-medium border transition-colors disabled:opacity-40 ${
+                        on
+                          ? 'bg-indigo-600 text-white border-indigo-600'
+                          : 'bg-white text-slate-600 border-slate-300 hover:bg-slate-50'
+                      }`}
+                    >
+                      {o.label}
+                    </button>
+                  );
+                })}
+                </div>
+              </div>
+            </div>
+
+            <label className="flex items-center gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={mtReferenceSettings.autoLookupOnSegmentChange}
+                onChange={(e) =>
+                  onUpdateMtReferenceSettings({
+                    ...mtReferenceSettings,
+                    autoLookupOnSegmentChange: e.target.checked,
+                  })
+                }
+                disabled={!mtReferenceSettings.enabled}
+                className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 disabled:opacity-50"
+              />
+              <span className="text-sm text-slate-800">
+                句段切换时自动查询参考译文（单引擎为底部 MT 面板，多引擎对比为弹层）
+              </span>
+            </label>
+
+            <label className="flex items-center gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={mtReferenceSettings.compareMode ?? false}
+                onChange={(e) =>
+                  onUpdateMtReferenceSettings({
+                    ...mtReferenceSettings,
+                    compareMode: e.target.checked,
+                  })
+                }
+                disabled={!mtReferenceSettings.enabled}
+                className="rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 disabled:opacity-50"
+              />
+              <span className="text-sm text-slate-800">
+                默认使用多引擎对比（Ctrl+Shift+M 与句段自动查询打开全屏对比弹层；单引擎仍在底部 MT 面板，最多 6 个引擎）
+              </span>
+            </label>
+
+            <div className="flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                disabled={!mtReferenceSettings.enabled || mtRefTesting}
+                onClick={() => void runMtReferenceConnectionTest()}
+                className="px-4 py-2 text-sm font-medium text-white bg-indigo-600 rounded-xl hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {mtRefTesting ? '检测中…' : '测试连接'}
+              </button>
+              {mtRefTestMsg && (
+                <span className={`text-sm ${mtRefTestMsg.ok ? 'text-green-700' : 'text-red-600'}`}>
+                  {mtRefTestMsg.text}
                 </span>
               )}
             </div>

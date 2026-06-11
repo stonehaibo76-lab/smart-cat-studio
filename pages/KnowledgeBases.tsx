@@ -4,6 +4,7 @@ import { KnowledgeBase, Project, EmbeddingSettings } from '../types';
 import { chunkKnowledgeText } from '../services/knowledgeRagService';
 import { embedTexts } from '../services/embeddingClient';
 import { Icons } from '../components/ui/Icons';
+import { isPortablePackage } from '../utils/packageProfile';
 
 interface KnowledgeBasesPageProps {
   knowledgeBases: KnowledgeBase[];
@@ -134,7 +135,7 @@ export const KnowledgeBasesPage: React.FC<KnowledgeBasesPageProps> = ({
       const id = editing?.id ?? generateKbId();
       let chunks = chunkKnowledgeText(trimmed, { baseId: id, maxChars: 300, overlap: 50 });
 
-      if (embeddingSettings.enabled && embeddingSettings.serviceUrl?.trim()) {
+      if (!isPortablePackage() && embeddingSettings.enabled && embeddingSettings.serviceUrl?.trim()) {
         try {
           const texts = chunks.map((c) => c.text);
           const { vectors, model } = await embedTexts(
@@ -284,6 +285,7 @@ export const KnowledgeBasesPage: React.FC<KnowledgeBasesPageProps> = ({
                     切块数：<span className="font-mono">{kb.chunks.length}</span> · 原文约{' '}
                     {kb.rawText.length} 字
                   </div>
+                  {!isPortablePackage() && (
                   <div>
                     已向量化：{' '}
                     <span className="font-mono">
@@ -291,6 +293,7 @@ export const KnowledgeBasesPage: React.FC<KnowledgeBasesPageProps> = ({
                     </span>{' '}
                     / {kb.chunks.length}
                   </div>
+                  )}
                 </div>
                 <div className="mt-4 flex flex-wrap gap-2">
                   <button
@@ -300,6 +303,7 @@ export const KnowledgeBasesPage: React.FC<KnowledgeBasesPageProps> = ({
                   >
                     编辑
                   </button>
+                  {!isPortablePackage() && (
                   <button
                     type="button"
                     disabled={reembeddingId === kb.id || !embeddingSettings.enabled}
@@ -313,6 +317,7 @@ export const KnowledgeBasesPage: React.FC<KnowledgeBasesPageProps> = ({
                   >
                     {reembeddingId === kb.id ? '向量计算中…' : '重算向量'}
                   </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => setShowDeleteId(kb.id)}
@@ -439,7 +444,7 @@ export const KnowledgeBasesPage: React.FC<KnowledgeBasesPageProps> = ({
                 onClick={() => void saveKb()}
                 className="px-4 py-2 text-sm text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50"
               >
-                {isSavingKb ? '保存中（含向量）…' : '保存'}
+                {isSavingKb ? (isPortablePackage() ? '保存中…' : '保存中（含向量）…') : '保存'}
               </button>
             </div>
           </div>

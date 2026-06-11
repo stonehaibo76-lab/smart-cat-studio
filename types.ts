@@ -2,8 +2,12 @@ export enum SegmentStatus {
   NotStarted = 'NotStarted',
   Draft = 'Draft',
   Translated = 'Translated', // AI or Human initial pass
+  PreTranslated = 'PreTranslated',
   Confirmed = 'Confirmed',
-  Review = 'Review'
+  Review = 'Review',
+  Proofread = 'Proofread',
+  Approved = 'Approved',
+  Rejected = 'Rejected',
 }
 
 export enum MatchType {
@@ -57,6 +61,20 @@ export interface TradosPackageMeta {
   xliffPaths: string[];
 }
 
+/** Inline run style for DOCX WYSIWYG / format-preserving merge (tag id → style). */
+export interface InlineRunStyle {
+  id: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strike?: boolean;
+  /** Word w:color val, e.g. FF0000 */
+  color?: string;
+  /** Word w:highlight val, e.g. yellow */
+  highlight?: string;
+  vertAlign?: 'superscript' | 'subscript';
+}
+
 export interface Segment {
   id: string;
   sourceText: string;
@@ -74,6 +92,10 @@ export interface Segment {
   sdlOrigin?: string;
   /** 用户在本会话中修改过译文（SDL 导出时改 origin） */
   xliffModified?: boolean;
+  /** Okapi 侧车 extract 返回的 TU id，merge 时写回 */
+  okapiTuId?: string;
+  /** DOCX inline run styles keyed by marker id (1, 2, …) */
+  inlineRunMeta?: InlineRunStyle[];
 }
 
 export interface ProjectFile {
@@ -85,6 +107,8 @@ export interface ProjectFile {
     interchangeFormat?: InterchangeFormat;
     /** 文件级 XLIFF 元数据（每文件一个 blob） */
     interchangeMeta?: Omit<XliffInterchangeMeta, 'xliffSegmentId' | 'mqIndex'>;
+    /** 原文文件 blob（docx/txt/html），用于格式保真 merge 导出 */
+    sourceBlobId?: string;
 }
 
 export interface Project {
@@ -252,10 +276,14 @@ export interface TranslationMemory {
 }
 
 export interface AISettings {
-  provider: 'gemini' | 'deepseek' | 'openai';
+  provider: 'gemini' | 'deepseek' | 'openai' | 'local';
   model: string;
   customPrompt?: string;
-  deepSeekKey?: string; 
+  deepSeekKey?: string;
+  /** 本地 llama-server OpenAI 兼容根地址，如 http://127.0.0.1:8080/v1 */
+  localLlmBaseUrl?: string;
+  /** 可选，llama-server 通常不需要 */
+  localLlmApiKey?: string;
 }
 
 /** 本地 Embedding 服务（知识库向量 RAG），独立持久化于 settings */
@@ -277,6 +305,64 @@ export const DEFAULT_EMBEDDING_SETTINGS: EmbeddingSettings = {
   serviceUrl: 'http://127.0.0.1:8765',
   ragMode: 'hybrid',
   hybridLexicalWeight: 0.35
+};
+
+/** 机器翻译参考（translators sidecar），持久化于 settings_kv mt-reference-settings */
+export interface MtReferenceSettings {
+  enabled: boolean;
+  serviceUrl: string;
+  apiKey?: string;
+  defaultTranslator: string;
+  enabledTranslators: string[];
+  autoLookupOnSegmentChange: boolean;
+  /** 多引擎对比模式（并行查询 compareTranslators） */
+  compareMode?: boolean;
+  /** 对比模式下参与查询的引擎 id（最多 MT_COMPARE_MAX 个） */
+  compareTranslators?: string[];
+  /** 与 constants.MT_TRANSLATOR_CATALOG_VERSION 对齐，用于引擎列表升级迁移 */
+  engineCatalogVersion?: number;
+  /** 为 true 时启动 sidecar 不执行 translators 全引擎预热（MT_REF_PREACCELERATE=0） */
+  disableStartupPreaccelerate?: boolean;
+}
+
+export const DEFAULT_MT_REFERENCE_SETTINGS: MtReferenceSettings = {
+  enabled: false,
+  serviceUrl: 'http://127.0.0.1:8770',
+  defaultTranslator: 'youdao',
+  enabledTranslators: [
+    'cloudTranslation', 'google', 'iciba', 'iflyrec', 'itranslate', 'lara', 'lingvanex', 'modernMt',
+    'papago', 'qqTranSmart', 'reverso', 'sogou', 'sysTran', 'translateCom', 'xunjie', 'yandex', 'youdao',
+  ],
+  autoLookupOnSegmentChange: true,
+  compareMode: false,
+  compareTranslators: ['youdao', 'cloudTranslation', 'sogou', 'qqTranSmart'],
+  engineCatalogVersion: 3,
+  disableStartupPreaccelerate: false,
+};
+
+/** Okapi 侧车（行业标准 extract/merge），持久化于 settings_kv okapi-settings */
+export interface OkapiSettings {
+  enabled: boolean;
+  serviceUrl: string;
+  javaPath?: string;
+}
+
+export const DEFAULT_OKAPI_SETTINGS: OkapiSettings = {
+  enabled: false,
+  serviceUrl: 'http://127.0.0.1:8090',
+};
+
+export type PreTranslateStrategy = 'tmOnly' | 'tmMt' | 'tmLlm' | 'tmMtLlm' | 'llmOnly';
+
+/** 编辑器快捷键（settings_kv editor-shortcuts） */
+export interface EditorShortcutSettings {
+  quickMt?: string;
+  spellCheckEnabled?: boolean;
+}
+
+export const DEFAULT_EDITOR_SHORTCUTS: EditorShortcutSettings = {
+  quickMt: 'ctrl+m',
+  spellCheckEnabled: true,
 };
 
 export interface QuickPrompt {

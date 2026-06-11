@@ -1,10 +1,16 @@
 import { GoogleGenAI } from "@google/genai";
-import { SYSTEM_PROMPT } from '../constants';
+import { SYSTEM_PROMPT, DEFAULT_LOCAL_LLM_MODEL } from '../constants';
 import { QAIssue, AISettings } from '../types';
 import { withAiConcurrency } from './aiConcurrency';
+import { hasMarkerTags } from './xliff/markerTags';
+import {
+  checkLocalLlmHealth,
+  localLlmChatCompletions,
+  resolveLocalLlmBaseUrl,
+} from './localLlmClient';
 
-/** DeepSeek / Gemini 单次生成超时（毫秒） */
-const DEEPSEEK_FETCH_TIMEOUT_MS = 180_000;
+/** DeepSeek / Gemini / 本地 LLM 单次生成超时（毫秒） */
+const OPENAI_COMPAT_FETCH_TIMEOUT_MS = 180_000;
 const GEMINI_GENERATE_TIMEOUT_MS = 180_000;
 
 function geminiAbortSignal(): AbortSignal {
@@ -21,55 +27,100 @@ try {
   console.error("Failed to initialize GoogleGenAI", error);
 }
 
-// --- DeepSeek / OpenAI Helper ---
-const callDeepSeek = async (
-    prompt: string, 
-    apiKey: string, 
-    systemPrompt: string = SYSTEM_PROMPT,
-    jsonMode: boolean = false,
-    model: string = "deepseek-chat"
+// --- OpenAI-compatible API (DeepSeek / local via proxy) ---
+const callOpenAICompatible = async (
+  baseUrl: string,
+  apiKey: string,
+  prompt: string,
+  systemPrompt: string = SYSTEM_PROMPT,
+  jsonMode: boolean = false,
+  model: string = "deepseek-chat",
+  deepSeekExtras?: { isDeepSeekV4Pro?: boolean }
 ): Promise<string> => {
-    try {
-        const isDeepSeekV4Pro = model === 'deepseek-v4-pro';
-        const response = await fetch("https://api.deepseek.com/chat/completions", {
-            method: "POST",
-            signal: AbortSignal.timeout(DEEPSEEK_FETCH_TIMEOUT_MS),
-            headers: {
-                "Content-Type": "application/json",
-                "Authorization": `Bearer ${apiKey}`
-            },
-            body: JSON.stringify({
-                model,
-                messages: [
-                    { role: "system", content: systemPrompt },
-                    { role: "user", content: prompt }
-                ],
-                response_format: jsonMode ? { type: "json_object" } : undefined,
-                temperature: 0.3,
-                // DeepSeek 文档中的 v4-pro 推理参数（flash 不携带）
-                reasoning_effort: isDeepSeekV4Pro ? "high" : undefined,
-                extra_body: isDeepSeekV4Pro ? { thinking: { type: "enabled" } } : undefined
-            })
-        });
+  const root = baseUrl.replace(/\/+$/, '');
+  const isDeepSeekV4Pro = deepSeekExtras?.isDeepSeekV4Pro ?? model === 'deepseek-v4-pro';
+  const body: Record<string, unknown> = {
+    model,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: prompt }
+    ],
+    response_format: jsonMode ? { type: "json_object" } : undefined,
+    temperature: 0.3,
+  };
+  if (isDeepSeekV4Pro) {
+    body.reasoning_effort = "high";
+    body.extra_body = { thinking: { type: "enabled" } };
+  }
 
-        if (!response.ok) {
-            const err = await response.text();
-            throw new Error(`DeepSeek API Error: ${response.status} - ${err}`);
-        }
+  const response = await fetch(`${root}/chat/completions`, {
+    method: "POST",
+    signal: AbortSignal.timeout(OPENAI_COMPAT_FETCH_TIMEOUT_MS),
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${apiKey}`
+    },
+    body: JSON.stringify(body)
+  });
 
-        const data = (await response.json()) as {
-          choices?: { message?: { content?: unknown } }[];
-        };
-        const content = data?.choices?.[0]?.message?.content;
-        if (typeof content !== 'string') {
-          throw new Error('DeepSeek API 返回格式异常：缺少文本内容');
-        }
-        return content;
-    } catch (e) {
-        console.error("DeepSeek Call Failed:", e);
-        throw e;
-    }
-}
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`API Error: ${response.status} - ${err}`);
+  }
+
+  const data = (await response.json()) as {
+    choices?: { message?: { content?: unknown } }[];
+  };
+  const content = data?.choices?.[0]?.message?.content;
+  if (typeof content !== 'string') {
+    throw new Error('API 返回格式异常：缺少文本内容');
+  }
+  return content;
+};
+
+const callDeepSeek = async (
+  prompt: string,
+  apiKey: string,
+  systemPrompt: string = SYSTEM_PROMPT,
+  jsonMode: boolean = false,
+  model: string = "deepseek-chat"
+): Promise<string> => {
+  try {
+    return await callOpenAICompatible(
+      "https://api.deepseek.com/v1",
+      apiKey,
+      prompt,
+      systemPrompt,
+      jsonMode,
+      model,
+      { isDeepSeekV4Pro: model === 'deepseek-v4-pro' }
+    );
+  } catch (e) {
+    console.error("DeepSeek Call Failed:", e);
+    throw e;
+  }
+};
+
+const callLocalLlm = async (
+  settings: AISettings,
+  prompt: string,
+  systemPrompt: string = SYSTEM_PROMPT,
+  jsonMode: boolean = false,
+  model?: string,
+  maxTokens: number = 1024
+): Promise<string> => {
+  return localLlmChatCompletions(settings, {
+    model: model || settings.model || DEFAULT_LOCAL_LLM_MODEL,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: prompt }
+    ],
+    response_format: jsonMode ? { type: "json_object" } : undefined,
+    temperature: 0.3,
+    max_tokens: maxTokens,
+    chat_template_kwargs: { enable_thinking: false },
+  });
+};
 
 export const testAIConnection = async (
     settings?: AISettings
@@ -93,6 +144,21 @@ export const testAIConnection = async (
                 model
             );
             return { ok: true, text: `DeepSeek 连接成功（模型：${model}）。` };
+        } catch (e) {
+            return { ok: false, text: e instanceof Error ? e.message : String(e) };
+        }
+    }
+
+    if (settings.provider === 'local') {
+        const baseUrl = resolveLocalLlmBaseUrl(settings);
+        const health = await checkLocalLlmHealth(baseUrl, settings.localLlmApiKey?.trim());
+        if (!health.ok) {
+            return { ok: false, text: health.error || '无法连接本地 LLM 服务' };
+        }
+        const model = settings.model || DEFAULT_LOCAL_LLM_MODEL;
+        try {
+            await callLocalLlm(settings, '请仅回复：OK', '你是连接测试助手。', false, model, 16);
+            return { ok: true, text: `本地 LLM 连接成功（${baseUrl}，模型：${model}）。` };
         } catch (e) {
             return { ok: false, text: e instanceof Error ? e.message : String(e) };
         }
@@ -155,7 +221,18 @@ export const translateSegment = async (
   if (ragContext && ragContext.trim()) {
       prompt += `\n[参考资料 / 知识库检索]:\n${ragContext.trim()}\n\n以上仅供翻译参考；若与强制术语表冲突，必须以术语表为准；无法从参考资料推断时请严格依据原文翻译。\n`;
   }
+  if (hasMarkerTags(sourceText)) {
+      prompt += `\n[格式标签 — 必须保留]: 原文含有形如 <1>...</1> 的内联格式标签。翻译时必须原样保留所有标签的位置与编号，只翻译标签内外的文字，不得增删、重命名或移动标签。\n`;
+  }
   prompt += `\n文本: "${sourceText}"`;
+
+  if (settings?.provider === 'local') {
+    const readiness = getAIReadinessError(settings);
+    if (readiness) throw new Error(readiness);
+    return cleanQuotes(
+      await callLocalLlm(settings, prompt, SYSTEM_PROMPT, false, settings.model)
+    );
+  }
 
   // 1. Try DeepSeek if configured
   if (settings?.provider === 'deepseek' && settings.deepSeekKey) {
@@ -222,6 +299,13 @@ export const getAIReadinessError = (settings?: AISettings): string | null => {
     return '当前版本暂不支持 OpenAI 预翻译，请切换到 Gemini 或 DeepSeek。';
   }
 
+  if (settings.provider === 'local') {
+    if (!resolveLocalLlmBaseUrl(settings)) {
+      return '请填写本地 LLM 服务地址（如 http://127.0.0.1:8080/v1），并确保 llama-server 已启动。';
+    }
+    return null;
+  }
+
   return null;
 };
 
@@ -243,6 +327,17 @@ export const polishSegment = async (
         prompt += `[风格要求]: ${additionalContext}\n`;
     }
     prompt += `\n请直接输出润色后的译文，不要包含任何解释或引号。`;
+
+    if (settings?.provider === 'local') {
+        try {
+            return cleanQuotes(
+              await callLocalLlm(settings, prompt, SYSTEM_PROMPT, false, settings.model)
+            );
+        } catch (e) {
+            console.error(e);
+            return targetText;
+        }
+    }
 
     if (settings?.provider === 'deepseek' && settings.deepSeekKey) {
         try {
@@ -281,6 +376,18 @@ export const sendAIChatMessage = async (
     const systemInstruction = `你是一个专业的CAT工具AI助手。你的任务是协助翻译人员解决术语、语法或背景知识问题。
     当前项目背景: ${context || '无'}
     请用简洁、专业的语言回答。`;
+
+    if (settings?.provider === 'local') {
+        try {
+             let prompt = "";
+             history.forEach(h => prompt += `${h.role === 'user' ? 'User' : 'Assistant'}: ${h.text}\n`);
+             prompt += `User: ${newMessage}`;
+             return await callLocalLlm(settings, prompt, systemInstruction, false, settings.model);
+        } catch (e) {
+            console.error(e);
+            return "AI 暂时无法响应，请稍后再试。";
+        }
+    }
 
     if (settings?.provider === 'deepseek' && settings.deepSeekKey) {
         try {
@@ -340,6 +447,15 @@ export const analyzeProjectContext = async (
 
     请将所有分析浓缩为一段大约 100 字以内的“AI翻译提示词”，我将把这段提示词发给翻译模型。只返回这段提示词即可。`;
 
+    if (settings?.provider === 'local') {
+        try {
+            return await callLocalLlm(settings, prompt, SYSTEM_PROMPT, false, settings.model);
+        } catch (e) {
+            console.error(e);
+            return "保持专业、准确的翻译风格。";
+        }
+    }
+
     if (settings?.provider === 'deepseek' && settings.deepSeekKey) {
         try {
             return await callDeepSeek(prompt, settings.deepSeekKey, SYSTEM_PROMPT, false, settings.model || 'deepseek-v4-flash');
@@ -393,8 +509,13 @@ ${enabledChecks.join('\n')}
 
     let jsonStr = "[]";
 
+    if (settings?.provider === 'local') {
+        try {
+            jsonStr = await callLocalLlm(settings, prompt, SYSTEM_PROMPT, true, settings.model, 2048);
+        } catch (e) { console.error(e); }
+    }
     // 1. Try DeepSeek
-    if (settings?.provider === 'deepseek' && settings.deepSeekKey) {
+    else if (settings?.provider === 'deepseek' && settings.deepSeekKey) {
         try {
             jsonStr = await callDeepSeek(prompt, settings.deepSeekKey, SYSTEM_PROMPT, true, settings.model || 'deepseek-v4-flash');
         } catch (e) { console.error(e); }
@@ -486,8 +607,13 @@ ${safeText}
 
     let jsonStr = "[]";
 
+     if (settings?.provider === 'local') {
+        try {
+            jsonStr = await callLocalLlm(settings, prompt, SYSTEM_PROMPT, true, settings.model, 2048);
+        } catch (e) { console.error(e); }
+    }
      // 1. Try DeepSeek
-     if (settings?.provider === 'deepseek' && settings.deepSeekKey) {
+     else if (settings?.provider === 'deepseek' && settings.deepSeekKey) {
         try {
             jsonStr = await callDeepSeek(prompt, settings.deepSeekKey, SYSTEM_PROMPT, true, settings.model || 'deepseek-v4-flash');
         } catch (e) { console.error(e); }

@@ -12,7 +12,9 @@ import {
   computeTwinAverageConfidence
 } from './services/twinTranslatorService';
 import { OnlineDictionaryPage } from './pages/OnlineDictionary';
-import { Project, Segment, TermBase, TranslationMemory, TermBaseEntry, TranslationMemoryUnit, AISettings, SegmentStatus, MatchType, QuickPrompt, FavoriteUrl, CustomOnlineDictionary, TwinTranslatorProfile, KnowledgeBase, EmbeddingSettings, DEFAULT_EMBEDDING_SETTINGS, GrammarRuleBook, RegexDictionaryBook, EditorQuickSymbol, PerformanceSettings } from './types';
+import { Project, Segment, TermBase, TranslationMemory, TermBaseEntry, TranslationMemoryUnit, AISettings, SegmentStatus, MatchType, QuickPrompt, FavoriteUrl, CustomOnlineDictionary, TwinTranslatorProfile, KnowledgeBase, EmbeddingSettings, DEFAULT_EMBEDDING_SETTINGS, MtReferenceSettings, DEFAULT_MT_REFERENCE_SETTINGS, GrammarRuleBook, RegexDictionaryBook, EditorQuickSymbol, PerformanceSettings } from './types';
+import { normalizeMtReferenceSettings } from './utils/mtReferenceSettings';
+import { isPortablePackage } from './utils/packageProfile';
 import {
   APP_VERSION_METADATA,
   DEFAULT_EDITOR_QUICK_SYMBOLS,
@@ -35,6 +37,13 @@ import {
   downloadBytes,
   type XliffFileExportFormat,
 } from './services/xliff/xliffExport';
+import {
+  exportOriginalFormatFile,
+  exportOriginalFormatProjectZip,
+  supportsOriginalFormatExport,
+} from './services/catInterop/originalFormatExport';
+import type { MonolingualExportFont } from './services/catInterop/originalFormatExportTypes';
+import { DEFAULT_OKAPI_SETTINGS, type OkapiSettings } from './types';
 import { normalizeProjectsXliffMeta } from './services/xliff/projectXliffDetect';
 import { shouldAutoLockSegmentAtImport } from './services/segmentAutoLock';
 import {
@@ -300,6 +309,9 @@ const App: React.FC = () => {
   const [grammarRuleBooks, setGrammarRuleBooks] = useState<GrammarRuleBook[]>([]);
   const [regexDictionaryBooks, setRegexDictionaryBooks] = useState<RegexDictionaryBook[]>([]);
   const [embeddingSettings, setEmbeddingSettings] = useState<EmbeddingSettings>(DEFAULT_EMBEDDING_SETTINGS);
+  const [mtReferenceSettings, setMtReferenceSettings] = useState<MtReferenceSettings>(() =>
+    normalizeMtReferenceSettings(DEFAULT_MT_REFERENCE_SETTINGS)
+  );
   const [performanceSettings, setPerformanceSettings] = useState<PerformanceSettings>(
     DEFAULT_PERFORMANCE_SETTINGS
   );
@@ -310,6 +322,7 @@ const App: React.FC = () => {
   /** 翻译编辑页注册：划选 / 当前句原文，供标题栏「在线词典」与 Ctrl+D 使用 */
   const dictionaryQueryResolverRef = useRef<(() => string) | null>(null);
   const editorDictionaryOpenerRef = useRef<(() => void) | null>(null);
+  const editorMtReferenceOpenerRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     applyPerformanceSettings(performanceSettings);
@@ -428,6 +441,14 @@ const App: React.FC = () => {
                 ...DEFAULT_EMBEDDING_SETTINGS,
                 ...(data.embeddingSettings as EmbeddingSettings | null | undefined)
               });
+              setMtReferenceSettings(
+                normalizeMtReferenceSettings({
+                  ...(isPortablePackage() && data.mtReferenceSettings == null
+                    ? { ...DEFAULT_MT_REFERENCE_SETTINGS, enabled: true }
+                    : DEFAULT_MT_REFERENCE_SETTINGS),
+                  ...(data.mtReferenceSettings as MtReferenceSettings | null | undefined),
+                })
+              );
               setAiSettings(
                 (data.aiSettings ?? { provider: 'gemini', model: 'gemini-3-flash-preview' }) as AISettings
               );
@@ -560,6 +581,7 @@ const App: React.FC = () => {
     return () => window.removeEventListener('pagehide', flushGrammarAndRegex);
   }, [isLoading]);
   useDebounceSave(embeddingSettings, (val) => db.saveSettings('embedding-settings', val), 500);
+  useDebounceSave(mtReferenceSettings, (val) => db.saveSettings('mt-reference-settings', val), 500);
   useDebounceSave(performanceSettings, (val) => db.saveSettings('performance-settings', val), 500);
   
   // Save settings with shorter delay
@@ -631,6 +653,12 @@ const App: React.FC = () => {
     setSearchQuery('');
   }, [activePage]);
 
+  const openMtReferencePanel = useCallback(() => {
+    if (activePage === 'editor' && editorMtReferenceOpenerRef.current) {
+      editorMtReferenceOpenerRef.current();
+    }
+  }, [activePage]);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!e.ctrlKey && !e.metaKey) return;
@@ -700,8 +728,9 @@ const App: React.FC = () => {
     fileName: string,
     content: string,
     isExcel: boolean = false,
-    excelSegments?: Array<{ source: string; target?: string }>,
-    xliffProject?: ParsedXliffProject
+    excelSegments?: Array<{ source: string; target?: string; okapiTuId?: string; inlineRunMeta?: import('./types').InlineRunStyle[] }>,
+    xliffProject?: ParsedXliffProject,
+    sourceBlobId?: string
   ) => {
       setProjects(prev => prev.map(p => {
           if (p.id === projectId) {
@@ -762,7 +791,9 @@ const App: React.FC = () => {
                           targetText: targetText,
                           status: status,
                           matchType: MatchType.None,
-                          isLocked: isLocked
+                          isLocked: isLocked,
+                          okapiTuId: item.okapiTuId ?? `p-${index}`,
+                          inlineRunMeta: item.inlineRunMeta,
                       };
                   });
               } else {
@@ -796,6 +827,7 @@ const App: React.FC = () => {
                   totalSegments: segs.length,
                   progress:
                       segs.length > 0 ? Math.round((newFileCompleted / segs.length) * 100) : 0,
+                  sourceBlobId,
               };
 
               const updatedFiles = [...p.files, newFile];
@@ -996,11 +1028,12 @@ const App: React.FC = () => {
 
   // 导出当前文件功能
   const handleExportFile = async (options: {
-    format: 'excel' | 'tmx' | 'sdlxliff' | 'mqxliff' | 'sdlrpx';
+    format: 'excel' | 'tmx' | 'sdlxliff' | 'mqxliff' | 'sdlrpx' | 'original';
     onlyConfirmed: boolean;
     exportType?: 'all' | 'unlockedSource' | 'unlockedSourceTarget' | 'untranslated' | 'confirmed';
     exportScope?: 'currentFile' | 'project';
     sourceTargetOnly?: boolean;
+    exportFont?: MonolingualExportFont;
   }) => {
     if (!activeProject) return;
 
@@ -1040,6 +1073,72 @@ const App: React.FC = () => {
 
     const exportType = options.exportType || 'all';
     const exportScope = options.exportScope || 'currentFile';
+
+    const filterSegments = (segments: Segment[]) => {
+      if (exportType === 'unlockedSource') {
+        return segments.filter((segment) => !segment.isLocked);
+      }
+      if (exportType === 'unlockedSourceTarget') {
+        return segments.filter((segment) => !segment.isLocked);
+      }
+      if (exportType === 'untranslated') {
+        return segments.filter(
+          (segment) =>
+            !segment.isLocked && (!segment.targetText || segment.targetText.trim() === '')
+        );
+      }
+      if (exportType === 'confirmed') {
+        return segments.filter((segment) => segment.status === SegmentStatus.Confirmed);
+      }
+      return options.onlyConfirmed
+        ? segments.filter((segment) => segment.status === SegmentStatus.Confirmed)
+        : segments;
+    };
+
+    if (options.format === 'original') {
+      const okapiSettings: OkapiSettings = DEFAULT_OKAPI_SETTINGS;
+      try {
+        const filesToExport =
+          exportScope === 'project'
+            ? activeProject.files.filter((f) => supportsOriginalFormatExport(f.name))
+            : supportsOriginalFormatExport(activeFile.name)
+              ? [activeFile]
+              : [];
+
+        if (filesToExport.length === 0) {
+          alert('当前文件不支持导出原文格式（仅 .docx / .txt / .html）。');
+          return;
+        }
+
+        if (exportScope === 'project' && filesToExport.length > 1) {
+          const map = new Map<string, Segment[]>();
+          for (const file of filesToExport) {
+            map.set(file.id, filterSegments(file.segments));
+          }
+          const zipName = await exportOriginalFormatProjectZip(
+            filesToExport,
+            map,
+            okapiSettings,
+            options.exportFont
+          );
+          alert(`已导出 ${filesToExport.length} 个保真原文格式文件：${zipName}`);
+          return;
+        }
+
+        const file = filesToExport[0];
+        const outName = await exportOriginalFormatFile(
+          file,
+          filterSegments(file.segments),
+          okapiSettings,
+          options.exportFont
+        );
+        alert(`已导出保真原文格式：${outName}`);
+      } catch (e) {
+        alert(e instanceof Error ? e.message : '导出原文格式失败');
+      }
+      return;
+    }
+
     const sourceTargetOnly = options.sourceTargetOnly || false;
     const filesToExport = exportScope === 'project' ? activeProject.files : [activeFile];
     const allSegments = filesToExport.flatMap(file =>
@@ -1062,11 +1161,11 @@ const App: React.FC = () => {
       filteredSegments = allSegments.filter(segment => !segment.isLocked && (!segment.targetText || segment.targetText.trim() === ''));
     } else if (exportType === 'confirmed') {
       // 导出已确认句段原文和译文
-      filteredSegments = allSegments.filter(segment => segment.status === 'Confirmed');
+      filteredSegments = allSegments.filter(segment => segment.status === SegmentStatus.Confirmed);
     } else {
       // 原有逻辑：全部或仅已确认
       filteredSegments = options.onlyConfirmed
-        ? allSegments.filter(segment => segment.status === 'Confirmed')
+        ? allSegments.filter(segment => segment.status === SegmentStatus.Confirmed)
         : allSegments;
     }
 
@@ -1375,10 +1474,13 @@ const App: React.FC = () => {
                 knowledgeBases={knowledgeBases}
                 onKnowledgeBasesChange={setKnowledgeBases}
                 embeddingSettings={embeddingSettings}
+                mtReferenceSettings={mtReferenceSettings}
+                onUpdateMtReferenceSettings={setMtReferenceSettings}
                 grammarRuleBooks={grammarRuleBooks}
                 regexDictionaryBooks={regexDictionaryBooks}
                 dictionaryQueryResolverRef={dictionaryQueryResolverRef}
                 editorDictionaryOpenerRef={editorDictionaryOpenerRef}
+                editorMtReferenceOpenerRef={editorMtReferenceOpenerRef}
                 customOnlineDictionaries={customOnlineDictionaries}
                 reduceVisualEffects={performanceSettings.performanceMode}
             />
@@ -1421,6 +1523,8 @@ const App: React.FC = () => {
                 onSaveCustomOnlineDictionaries={saveCustomOnlineDictionariesToDb}
                 embeddingSettings={embeddingSettings}
                 onUpdateEmbeddingSettings={setEmbeddingSettings}
+                mtReferenceSettings={mtReferenceSettings}
+                onUpdateMtReferenceSettings={setMtReferenceSettings}
                 performanceSettings={performanceSettings}
                 onUpdatePerformanceSettings={setPerformanceSettings}
                 capitalizeTargetFirstLetterZhOut={capitalizeTargetFirstLetterZhOut}
@@ -1594,6 +1698,7 @@ const App: React.FC = () => {
         isSaving={isSaving}
         favoriteUrls={favoriteUrls}
         onOpenOnlineDictionary={openOnlineDictionaryPage}
+        onOpenMtReference={mtReferenceSettings.enabled ? openMtReferencePanel : undefined}
         reduceVisualEffects={performanceSettings.performanceMode}
         authUser={isAuthRequired() ? authUser : null}
         onLogout={isAuthRequired() ? handleLogout : undefined}

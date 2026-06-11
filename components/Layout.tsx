@@ -8,6 +8,13 @@ import { isCloudDeployment } from '../services/deploymentMode';
 import type { AuthUser } from '../services/authService';
 import { segmentIsEffectivelyConfirmed } from '../services/segmentEffectiveStatus';
 import { getProjectXliffExportCapabilities } from '../services/xliff/projectXliffDetect';
+import { supportsOriginalFormatExport } from '../services/catInterop/originalFormatExport';
+import {
+  DEFAULT_MONOLINGUAL_EXPORT_FONT,
+  MONOLINGUAL_EXPORT_FONT_OPTIONS,
+  type MonolingualExportFont,
+} from '../services/catInterop/originalFormatExportTypes';
+import { canFormatPreservingExport } from '../services/catInterop/sourceBlobStore';
 import type { SettingsPanelId } from '../pages/Settings';
 
 function formatDataSize(bytes: number): string {
@@ -168,11 +175,13 @@ function openFavoriteInBrowser(raw: string) {
 }
 
 interface ExportOptions {
-  format: 'excel' | 'tmx' | 'sdlxliff' | 'mqxliff' | 'sdlrpx';
+  format: 'excel' | 'tmx' | 'sdlxliff' | 'mqxliff' | 'sdlrpx' | 'original';
   onlyConfirmed: boolean;
   exportType?: 'all' | 'unlockedSource' | 'unlockedSourceTarget' | 'untranslated' | 'confirmed';
   exportScope?: 'currentFile' | 'project';
   sourceTargetOnly?: boolean;
+  /** 单语原文格式导出字体（.docx / .html） */
+  exportFont?: MonolingualExportFont;
 }
 
 interface LayoutProps {
@@ -189,6 +198,8 @@ interface LayoutProps {
   favoriteUrls?: FavoriteUrl[];
   /** 打开在线词典页（标题栏入口，与 Ctrl+D 一致） */
   onOpenOnlineDictionary?: () => void;
+  /** 打开编辑页 MT 参考面板（与 Ctrl+Shift+M 一致） */
+  onOpenMtReference?: () => void;
   /** 低配机：减少标题栏与侧栏模糊合成 */
   reduceVisualEffects?: boolean;
   authUser?: AuthUser | null;
@@ -201,6 +212,7 @@ export const Layout: React.FC<LayoutProps> = ({
     activeFileId, onFileChange, onExportFile, isSaving = false,
     favoriteUrls = [],
     onOpenOnlineDictionary,
+    onOpenMtReference,
     reduceVisualEffects = false,
     authUser = null,
     onLogout,
@@ -242,13 +254,30 @@ export const Layout: React.FC<LayoutProps> = ({
     onlyConfirmed: false,
     exportType: 'all' as 'all' | 'unlockedSource' | 'unlockedSourceTarget' | 'untranslated' | 'confirmed',
     exportScope: 'currentFile' as 'currentFile' | 'project',
-    sourceTargetOnly: true
+    sourceTargetOnly: true,
+    exportFont: DEFAULT_MONOLINGUAL_EXPORT_FONT as MonolingualExportFont,
   });
 
   const isInteropExport =
     exportOptions.format === 'sdlxliff' ||
     exportOptions.format === 'mqxliff' ||
     exportOptions.format === 'sdlrpx';
+
+  const isOriginalFormatExport = exportOptions.format === 'original';
+
+  const activeFileForExport =
+    currentProject?.files.find((f) => f.id === activeFileId) ?? currentProject?.files[0];
+
+  const originalFormatFilesInScope =
+    exportOptions.exportScope === 'project'
+      ? (currentProject?.files.filter((f) => supportsOriginalFormatExport(f.name)) ?? [])
+      : activeFileForExport && supportsOriginalFormatExport(activeFileForExport.name)
+        ? [activeFileForExport]
+        : [];
+
+  const canOriginalFormatExport = originalFormatFilesInScope.some((f) =>
+    canFormatPreservingExport(f)
+  );
 
   const openExportOptions = () => {
     setExportOptions((prev) => {
@@ -621,7 +650,7 @@ export const Layout: React.FC<LayoutProps> = ({
                                                             name="exportFormat"
                                                             value="excel"
                                                             checked={exportOptions.format === 'excel'}
-                                                            onChange={(e) => setExportOptions(prev => ({ ...prev, format: e.target.value as 'excel' | 'tmx' }))}
+                                                            onChange={(e) => setExportOptions(prev => ({ ...prev, format: e.target.value as ExportOptions['format'] }))}
                                                             className="w-3 h-3 text-blue-600"
                                                         />
                                                         <span>Excel 文件 (.xlsx)</span>
@@ -632,11 +661,29 @@ export const Layout: React.FC<LayoutProps> = ({
                                                             name="exportFormat"
                                                             value="tmx"
                                                             checked={exportOptions.format === 'tmx'}
-                                                            onChange={(e) => setExportOptions(prev => ({ ...prev, format: e.target.value as 'excel' | 'tmx' }))}
+                                                            onChange={(e) => setExportOptions(prev => ({ ...prev, format: e.target.value as ExportOptions['format'] }))}
                                                             className="w-3 h-3 text-blue-600"
                                                         />
                                                         <span>TMX 文件 (.tmx)</span>
                                                     </label>
+                                                    {canOriginalFormatExport && (
+                                                      <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer hover:bg-slate-50 p-1.5 rounded">
+                                                        <input
+                                                          type="radio"
+                                                          name="exportFormat"
+                                                          value="original"
+                                                          checked={exportOptions.format === 'original'}
+                                                          onChange={() => setExportOptions(prev => ({ ...prev, format: 'original' }))}
+                                                          className="w-3 h-3 text-blue-600"
+                                                        />
+                                                        <span>原文格式（单语）</span>
+                                                      </label>
+                                                    )}
+                                                    {originalFormatFilesInScope.length > 0 && !canOriginalFormatExport && (
+                                                      <p className="text-[11px] text-amber-700 leading-relaxed pl-1">
+                                                        当前文件尚无原文件备份，请重新导入文档后再使用保真导出。
+                                                      </p>
+                                                    )}
                                                     {hasSdlxliffExport && (
                                                       <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer hover:bg-slate-50 p-1.5 rounded">
                                                         <input type="radio" name="exportFormat" value="sdlxliff" checked={exportOptions.format === 'sdlxliff'} onChange={() => setExportOptions(prev => ({ ...prev, format: 'sdlxliff' }))} className="w-3 h-3 text-blue-600" />
@@ -670,8 +717,40 @@ export const Layout: React.FC<LayoutProps> = ({
                                                 )}
                                             </div>
 
+                                            {isOriginalFormatExport && (
+                                              <div className="mb-4">
+                                                <label className="block text-xs font-medium text-slate-700 mb-1">导出字体</label>
+                                                <div className="space-y-1">
+                                                  {MONOLINGUAL_EXPORT_FONT_OPTIONS.map((opt) => (
+                                                    <label
+                                                      key={opt.id}
+                                                      className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer hover:bg-slate-50 p-1.5 rounded"
+                                                    >
+                                                      <input
+                                                        type="radio"
+                                                        name="exportFont"
+                                                        value={opt.id}
+                                                        checked={exportOptions.exportFont === opt.id}
+                                                        onChange={() =>
+                                                          setExportOptions((prev) => ({
+                                                            ...prev,
+                                                            exportFont: opt.id,
+                                                          }))
+                                                        }
+                                                        className="w-3 h-3 text-blue-600"
+                                                      />
+                                                      <span style={{ fontFamily: opt.previewFamily }}>{opt.label}</span>
+                                                    </label>
+                                                  ))}
+                                                </div>
+                                                <p className="mt-2 text-[11px] text-slate-500 leading-relaxed">
+                                                  将统一应用于导出文件中的译文文字（Word / HTML）。纯文本 .txt 不受字体设置影响。
+                                                </p>
+                                              </div>
+                                            )}
+
                                             {/* Column Selection */}
-                                            {!isInteropExport && (
+                                            {!isInteropExport && !isOriginalFormatExport && (
                                             <div className="mb-4">
                                                 <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer hover:bg-slate-50 p-1.5 rounded">
                                                     <input
@@ -744,6 +823,17 @@ export const Layout: React.FC<LayoutProps> = ({
                 >
                   <Icons.Globe className="h-4 w-4 shrink-0 text-blue-600" />
                   <span className="hidden sm:inline">在线词典</span>
+                </button>
+              )}
+              {onOpenMtReference && activePage === 'editor' && (
+                <button
+                  type="button"
+                  onClick={() => onOpenMtReference()}
+                  className="flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-transparent px-3 py-2 text-sm font-medium text-slate-700 transition-colors hover:border-slate-200 hover:bg-slate-100"
+                  title="MT 参考（Ctrl+Shift+M）"
+                >
+                  <Icons.Languages className="h-4 w-4 shrink-0 text-indigo-600" />
+                  <span className="hidden sm:inline">MT 参考</span>
                 </button>
               )}
               <button

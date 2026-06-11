@@ -137,6 +137,7 @@ export async function loadAllData(opts?: { omitHeavyCollections?: boolean }) {
     favoriteUrls?: unknown;
     customOnlineDictionaries?: unknown;
     embeddingSettings: unknown;
+    mtReferenceSettings?: unknown;
     welcomeCompleted?: boolean;
     skipStartupScreen?: boolean;
   }>(`/api/load-all${q}`);
@@ -174,6 +175,7 @@ export async function loadAllData(opts?: { omitHeavyCollections?: boolean }) {
       favoriteUrls: resolvedFavoriteUrls ?? null,
       customOnlineDictionaries: resolvedCustomOnlineDictionaries ?? null,
       embeddingSettings: raw.embeddingSettings ?? null,
+      mtReferenceSettings: raw.mtReferenceSettings ?? null,
       welcomeCompleted: raw.welcomeCompleted === true,
       skipStartupScreen: raw.skipStartupScreen === true,
     };
@@ -193,6 +195,7 @@ export async function loadAllData(opts?: { omitHeavyCollections?: boolean }) {
     favoriteUrls: resolvedFavoriteUrls ?? null,
     customOnlineDictionaries: resolvedCustomOnlineDictionaries ?? null,
     embeddingSettings: raw.embeddingSettings ?? null,
+    mtReferenceSettings: raw.mtReferenceSettings ?? null,
     welcomeCompleted: raw.welcomeCompleted === true,
     skipStartupScreen: raw.skipStartupScreen === true,
   };
@@ -208,6 +211,33 @@ export async function saveTermBases(tbs: TermBase[]) {
 
 export async function saveTMs(tms: TranslationMemory[]) {
   await fetchJson('/api/translation-memories', { method: 'PUT', body: JSON.stringify(tms) });
+}
+
+export type TmSearchHit = {
+  id: string;
+  source: string;
+  target: string;
+  score: number;
+  tmId: string;
+  sourceTM: string;
+};
+
+export async function searchTmMatchesApi(params: {
+  tmIds: string[];
+  sourceText: string;
+  minScore?: number;
+  limit?: number;
+  tmNames?: Record<string, string>;
+}): Promise<TmSearchHit[]> {
+  const res = await fetchJson<{ ok?: boolean; hits?: TmSearchHit[] }>(
+    '/api/tm/search',
+    {
+      method: 'POST',
+      body: JSON.stringify(params),
+    },
+    30_000
+  );
+  return res.hits ?? [];
 }
 
 export async function saveTwinTranslators(twinTranslators: TwinTranslatorProfile[]) {

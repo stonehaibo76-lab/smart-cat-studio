@@ -1,7 +1,7 @@
 {
-  "name": "smart-cat-studio-v1.7.7.7",
+  "name": "smart-cat-studio-v1.8.0",
   "private": true,
-  "version": "1.7.7.7",
+  "version": "1.8.0",
   "type": "module",
   "scripts": {
     "predev": "node scripts/ensure-vite.mjs",
@@ -9,6 +9,8 @@
     "dev:with-db": "concurrently \"npm run server\" \"npm run dev\"",
     "server": "node server/index.mjs",
     "build": "vite build",
+    "build:portable": "node scripts/packaging/assemble-portable.mjs",
+    "start:portable": "runtime\\node\\node.exe scripts\\packaging\\smartcat-launcher.mjs",
     "lint": "eslint .",
     "preview": "vite preview",
     "migrate:sqlite-to-pg": "node scripts/migrate-sqlite-to-pg.mjs",

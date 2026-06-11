@@ -7,12 +7,15 @@ import {
   type RowComponentProps,
 } from 'react-window';
 import { Icons } from '../components/ui/Icons';
-import { Project, Segment, SegmentStatus, MatchType, TermBase, TranslationMemory, TermBaseEntry, TermBaseEntryWithTb, TranslationMemoryUnit, QAIssue, AISettings, QuickPrompt, TwinTranslatorProfile, TranslationVariant, KnowledgeBase, EmbeddingSettings, DEFAULT_EMBEDDING_SETTINGS, GrammarRuleBook, RegexDictionaryBook, EditorQuickSymbol, CustomOnlineDictionary } from '../types';
+import { Project, Segment, SegmentStatus, MatchType, TermBase, TranslationMemory, TermBaseEntry, TermBaseEntryWithTb, TranslationMemoryUnit, QAIssue, AISettings, QuickPrompt, TwinTranslatorProfile, TranslationVariant, KnowledgeBase, EmbeddingSettings, DEFAULT_EMBEDDING_SETTINGS, MtReferenceSettings, DEFAULT_MT_REFERENCE_SETTINGS, GrammarRuleBook, RegexDictionaryBook, EditorQuickSymbol, CustomOnlineDictionary, PreTranslateStrategy, InlineRunStyle } from '../types';
 import {
   APP_VERSION_METADATA,
   DEFAULT_EDITOR_QUICK_SYMBOLS,
   EDITOR_QUICK_SYMBOL_CHAR_MAX,
   EDITOR_QUICK_SYMBOL_LIST_MAX,
+  MT_COMPARE_MAX,
+  MT_TRANSLATOR_OPTIONS,
+  mtTranslatorLabel,
 } from '../constants';
 import {
   flattenAndSortGrammarRules,
@@ -54,13 +57,17 @@ import {
   EditorDictionaryPanel,
   readDictionaryAutoLookupEnabled,
   writeDictionaryAutoLookupEnabled,
+  type EditorBottomPanelTab,
 } from '../components/EditorDictionaryPanel';
+import { MtCompareModal } from '../components/MtCompareModal';
+import { fetchMtReference, fetchMtReferenceCompare, segmentMayHaveInlineTags } from '../services/mtReferenceClient';
+import type { MtCompareResultItem } from '../services/mtReferenceClient';
 import { getAllOnlineDictionaryProviders, type OnlineDictionaryId } from '../services/onlineDictionaryUrls';
 import * as XLSX from 'xlsx';
 import {
   mapToSuperscript,
   mapToSubscript,
-  stripScriptFormatting
+  stripScriptFormatting,
 } from '../services/targetScriptFormat';
 import {
   getProjectDeliveryDueRaw,
@@ -68,7 +75,34 @@ import {
   type DeliveryDueReminder,
 } from '../services/projectDueDate';
 import { segmentIsEffectivelyConfirmed } from '../services/segmentEffectiveStatus';
-import { validateSdlMarkers } from '../services/xliff/tagValidation';
+import { applyTagFormatQaToSegment, shouldRunTagFormatQa, withTagFormatQaIssues } from '../services/xliff/tagFormatQa';
+import { hasInlineMarkers, stripInlineMarkers } from '../services/inlineFormatting/markerParse';
+import {
+  clearAllTargetFormatting,
+  clearFormattingInPlainRange,
+  pruneInlineRunMeta,
+} from '../services/inlineFormatting/clearTargetFormatting';
+import { applyRunStyleToTargetSelection, segmentHasCopyableSourceFormat, markerSelectionToPlainOffsets } from '../services/inlineFormatting/copySourceFormatting';
+import {
+  readActivePlainTextSelection,
+  readTargetEditorPlainSelection,
+} from '../services/inlineFormatting/selectionOffsets';
+import { InlineMarkedText } from '../components/InlineMarkedText';
+import { InlineMarkedEditor } from '../components/InlineMarkedEditor';
+import { sourcesEqual } from '../utils/textNormalize';
+import {
+  searchTmMatches,
+  prefetchTmMatches,
+  type TmMatchHit,
+} from '../services/tmMatchService';
+import {
+  runPreTranslateBatch,
+  glossaryFromTerms,
+  type PreTranslateBatchStats,
+} from '../services/preTranslateService';
+import { runProofreadBatch, type ProofreadBatchStats } from '../services/proofreadService';
+import { TermLensRow } from '../components/TermLensRow';
+import { QuickMtPopup } from '../components/QuickMtPopup';
 
 function deliveryDueBannerLook(kind: DeliveryDueReminder['kind']) {
   switch (kind) {
@@ -195,6 +229,8 @@ interface EditorProps {
   /** 将孪生译员学习例句另存为知识库时写入 */
   onKnowledgeBasesChange?: (list: KnowledgeBase[]) => void;
   embeddingSettings?: EmbeddingSettings;
+  mtReferenceSettings?: MtReferenceSettings;
+  onUpdateMtReferenceSettings?: (s: MtReferenceSettings) => void;
   /** 全局规则词典；项目通过 grammarRuleBookIds 挂载 */
   grammarRuleBooks?: GrammarRuleBook[];
   /** 全局正则表达式词典；项目通过 regexDictionaryBookIds 挂载 */
@@ -203,6 +239,8 @@ interface EditorProps {
   dictionaryQueryResolverRef?: React.MutableRefObject<(() => string) | null>;
   /** 在编辑页打开底部词典面板（Ctrl+D / 标题栏「在线词典」） */
   editorDictionaryOpenerRef?: React.MutableRefObject<(() => void) | null>;
+  /** 在编辑页打开 MT 参考面板（Ctrl+Shift+M / 标题栏「MT 参考」） */
+  editorMtReferenceOpenerRef?: React.MutableRefObject<(() => void) | null>;
   customOnlineDictionaries?: CustomOnlineDictionary[];
   /** 离开编辑页再进入时恢复到此句段（配合 resumeLayoutKey 在布局阶段读取） */
   resumeSegmentId?: string | null;
@@ -213,43 +251,6 @@ interface EditorProps {
   /** 低配机：减弱模糊与过渡动画 */
   reduceVisualEffects?: boolean;
 }
-
-// Helper to calculate similarity score (Levenshtein distance based)
-const calculateMatchScoreValue = (source: string, target: string): number => {
-    if (!source || !target) return 0;
-    if (source === target) return 100;
-    
-    const a = source.toLowerCase();
-    const b = target.toLowerCase();
-    const matrix = [];
-
-    for (let i = 0; i <= b.length; i++) {
-        matrix[i] = [i];
-    }
-
-    for (let j = 0; j <= a.length; j++) {
-        matrix[0][j] = j;
-    }
-
-    for (let i = 1; i <= b.length; i++) {
-        for (let j = 1; j <= a.length; j++) {
-            if (b.charAt(i - 1) === a.charAt(j - 1)) {
-                matrix[i][j] = matrix[i - 1][j - 1];
-            } else {
-                matrix[i][j] = Math.min(
-                    matrix[i - 1][j - 1] + 1,
-                    Math.min(matrix[i][j - 1] + 1, matrix[i - 1][j] + 1)
-                );
-            }
-        }
-    }
-    
-    const distance = matrix[b.length][a.length];
-    const maxLength = Math.max(a.length, b.length);
-    const similarity = Math.max(0, Math.floor(((maxLength - distance) / maxLength) * 100));
-    
-    return similarity;
-};
 
 const EDITOR_THEME_PRESETS = [
   { name: '默认白', source: '#ffffff', target: '#ffffff' },
@@ -346,8 +347,32 @@ const HighlightRegexInText = ({ text, pattern }: { text: string; pattern: string
 };
 
 // --- NEW Helper: Highlight Terms in Source (与 QA 相同：就长 + 纯拉丁字母词边界) ---
-const HighlightedSourceText = ({ text, terms }: { text: string; terms: TermBaseEntry[] }) => {
-    if (!terms || terms.length === 0) return <>{text}</>;
+const HighlightedSourceText = ({
+  text,
+  terms,
+  inlineRunMeta,
+  formatPickActive,
+  onFormattedRunPick,
+}: {
+  text: string;
+  terms: TermBaseEntry[];
+  inlineRunMeta?: Segment['inlineRunMeta'];
+  formatPickActive?: boolean;
+  onFormattedRunPick?: (runId: string, style: InlineRunStyle) => void;
+}) => {
+  if (hasInlineMarkers(text) || (inlineRunMeta && inlineRunMeta.length > 0)) {
+    return (
+      <InlineMarkedText
+        text={text}
+        inlineRunMeta={inlineRunMeta}
+        terms={terms}
+        formatPickActive={formatPickActive}
+        onFormattedRunPick={onFormattedRunPick}
+      />
+    );
+  }
+
+  if (!terms || terms.length === 0) return <>{text}</>;
 
     const segments = useMemo(
         () => segmentSourceByTermHits(text, terms, false),
@@ -396,10 +421,13 @@ const SegmentSourceEditorComponent = ({
     editorTheme,
     onSelectSource,
     allTerms,
+    onTermInsert,
     /** 跨文件搜索结果：文件名 · 句段号，显示在原文单元格底部左侧 */
     locationCaption,
     /** 对照列表为横向格；单句模式为原文上、译文下的竖条 */
-    layoutVariant = 'inline'
+    layoutVariant = 'inline',
+    formatPickActive = false,
+    onSourceRunFormatPick,
 }: {
     segment: Segment,
     isEditing: boolean,
@@ -412,8 +440,11 @@ const SegmentSourceEditorComponent = ({
     editorTheme: any,
     onSelectSource: (text: string) => void,
     allTerms: TermBaseEntryWithTb[],
+    onTermInsert?: (target: string) => void,
     locationCaption?: string | null,
-    layoutVariant?: 'inline' | 'stacked'
+    layoutVariant?: 'inline' | 'stacked',
+    formatPickActive?: boolean,
+    onSourceRunFormatPick?: (runId: string, style: InlineRunStyle) => void,
 }) => {
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const skipBlurSaveAfterSplitRef = useRef(false);
@@ -461,6 +492,7 @@ const SegmentSourceEditorComponent = ({
     };
 
     const handleMouseUp = (e: React.MouseEvent) => {
+         if (e.ctrlKey && formatPickActive) return;
          const selection = window.getSelection()?.toString();
          if (selection?.trim()) {
              e.stopPropagation();
@@ -572,8 +604,21 @@ const SegmentSourceEditorComponent = ({
                         onMouseUp={handleMouseUp}
                     >
                         {/* Use Highlighting Component here */}
-                        <HighlightedSourceText text={segment.sourceText} terms={relevantTerms} />
+                        <HighlightedSourceText
+                          text={segment.sourceText}
+                          terms={relevantTerms}
+                          inlineRunMeta={segment.inlineRunMeta}
+                          formatPickActive={formatPickActive}
+                          onFormattedRunPick={onSourceRunFormatPick}
+                        />
                     </div>
+                    {!segment.isLocked && onTermInsert && relevantTerms.length > 0 && (
+                        <TermLensRow
+                            sourceText={segment.sourceText}
+                            terms={relevantTerms}
+                            onInsertTarget={onTermInsert}
+                        />
+                    )}
                     {/* Edit Button - Visible on Hover */}
                     <button 
                         onClick={(e) => {
@@ -660,6 +705,13 @@ const SegmentTargetEditorInner = React.forwardRef<HTMLTextAreaElement, SegmentTa
     const textareaRef = useRef<HTMLTextAreaElement | null>(null);
     const [targetHovered, setTargetHovered] = useState(false);
 
+    const useMarkedEditor =
+      (segment.inlineRunMeta?.length ?? 0) > 0 ||
+      hasInlineMarkers(segment.sourceText) ||
+      hasInlineMarkers(segment.targetText);
+
+    const targetMeta = segment.inlineRunMeta;
+
     const assignTextareaRef = useCallback(
         (node: HTMLTextAreaElement | null) => {
             textareaRef.current = node;
@@ -670,17 +722,18 @@ const SegmentTargetEditorInner = React.forwardRef<HTMLTextAreaElement, SegmentTa
         [forwardedRef]
     );
 
-    // Auto-resize logic
+    // Auto-resize logic (plain textarea mode)
     useEffect(() => {
+        if (useMarkedEditor) return;
         const target = textareaRef.current;
         if (target) {
-            target.style.height = 'auto'; // Reset to recalculate shrink
-            target.style.height = `${target.scrollHeight}px`; // Set to content height
+            target.style.height = 'auto';
+            target.style.height = `${target.scrollHeight}px`;
             if (isActive) {
                 target.focus();
             }
         }
-    }, [segment.targetText, isActive, editorFontSize]);
+    }, [segment.targetText, isActive, editorFontSize, useMarkedEditor]);
 
     // Handle cursor/selection tracking
     const handleInputSelect = () => {
@@ -715,10 +768,51 @@ const SegmentTargetEditorInner = React.forwardRef<HTMLTextAreaElement, SegmentTa
             backgroundColor: lockedPendingVisual ? '#f8fafc' : editorTheme.targetBg,
             backgroundImage: segment.isLocked ? lockedStripeBg : 'none'
         }}>
+            {useMarkedEditor ? (
+              <>
+                <textarea
+                  ref={assignTextareaRef}
+                  className="sr-only"
+                  tabIndex={-1}
+                  aria-hidden
+                  value={segment.targetText}
+                  readOnly
+                />
+                {segment.isLocked ? (
+                  <div
+                    className="w-full p-3 leading-relaxed overflow-hidden block text-slate-900"
+                    style={{
+                      minHeight: '40px',
+                      fontSize: `${editorFontSize}px`,
+                      paddingBottom: showTargetFloatingBar ? '3rem' : '0.75rem',
+                    }}
+                  >
+                    <InlineMarkedText text={segment.targetText} inlineRunMeta={targetMeta} />
+                  </div>
+                ) : (
+                  <InlineMarkedEditor
+                    value={segment.targetText}
+                    inlineRunMeta={targetMeta}
+                    readOnly={false}
+                    className={`w-full p-3 leading-relaxed bg-transparent outline-none overflow-hidden block text-slate-900 ${
+                      isActive ? 'ring-1 ring-blue-300/50 rounded-sm' : ''
+                    }`}
+                    style={{
+                      minHeight: '40px',
+                      fontSize: `${editorFontSize}px`,
+                      paddingBottom: showTargetFloatingBar ? '3rem' : '0.75rem',
+                    }}
+                    onChange={(val) => onChange(segment.id, val)}
+                    onSelectionChange={onSelectionChange}
+                  />
+                )}
+              </>
+            ) : (
              <textarea 
                 ref={assignTextareaRef}
                 tabIndex={segment.isLocked ? -1 : undefined}
                 readOnly={segment.isLocked}
+                spellCheck={true}
                 className={`w-full p-3 leading-relaxed bg-transparent outline-none resize-none overflow-hidden block ${
                     segment.isLocked
                         ? `cursor-not-allowed ${lockedPendingVisual ? 'text-slate-500' : 'text-slate-900'}`
@@ -730,20 +824,17 @@ const SegmentTargetEditorInner = React.forwardRef<HTMLTextAreaElement, SegmentTa
                     e.target.style.height = 'auto';
                     e.target.style.height = `${e.target.scrollHeight}px`;
                 }}
-                onSelect={(e) => handleInputSelect(e)}
+                onSelect={handleInputSelect}
                 onClick={handleInputSelect}
-                onKeyUp={(e) => handleInputSelect(e)}
+                onKeyUp={handleInputSelect}
                 onKeyDown={(e) => {
                     if (segment.isLocked) return;
-                    // Req 7: Enter to confirm, Alt+Enter for new line
                     if (e.key === 'Enter') {
                         if (!e.altKey && !e.shiftKey) {
                             e.preventDefault();
                             onConfirm(segment);
                         }
-                        // If Alt+Enter, let default behavior (newline) happen
                     }
-                    // Shift+F3 to toggle case
                     if (e.key === 'F3' && e.shiftKey) {
                         e.preventDefault();
                         if (textareaRef.current) {
@@ -752,31 +843,21 @@ const SegmentTargetEditorInner = React.forwardRef<HTMLTextAreaElement, SegmentTa
                             if (start !== end) {
                                 const selectedText = textareaRef.current.value.substring(start, end);
                                 let newText = '';
-                                
-                                // Determine current case
                                 const isAllLower = selectedText === selectedText.toLowerCase();
                                 const isAllUpper = selectedText === selectedText.toUpperCase();
-                                
                                 if (isAllLower) {
-                                    // Convert to uppercase
                                     newText = selectedText.toUpperCase();
                                 } else if (isAllUpper) {
-                                    // Convert to title case
                                     newText = selectedText.split(' ').map(word => 
                                         word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
                                     ).join(' ');
                                 } else {
-                                    // Convert to lowercase
                                     newText = selectedText.toLowerCase();
                                 }
-                                
-                                // Replace selected text
                                 const updatedValue = textareaRef.current.value.substring(0, start) + 
                                     newText + 
                                     textareaRef.current.value.substring(end);
                                 onChange(segment.id, updatedValue);
-                                
-                                // Maintain selection
                                 setTimeout(() => {
                                     if (textareaRef.current) {
                                         textareaRef.current.selectionStart = start;
@@ -795,6 +876,7 @@ const SegmentTargetEditorInner = React.forwardRef<HTMLTextAreaElement, SegmentTa
                     paddingBottom: showTargetFloatingBar ? '3rem' : '0.75rem'
                 }}
             />
+            )}
 
             {/* QA Badges - Moved to bottom flow to avoid blocking text */}
             {segment.qaIssues && segment.qaIssues.length > 0 && (
@@ -804,7 +886,7 @@ const SegmentTargetEditorInner = React.forwardRef<HTMLTextAreaElement, SegmentTa
                             issue.type === 'error' ? 'bg-red-50 text-red-700 border border-red-200' : 'bg-amber-50 text-amber-800 border border-amber-200'
                         }`}>
                             <Icons.Warning className="w-3 h-3 shrink-0" />
-                            <span className="font-medium max-w-[150px] truncate">{issue.message}</span>
+                            <span className={`font-medium ${issue.category === 'tags' ? 'max-w-[240px]' : 'max-w-[150px]'} truncate`}>{issue.message}</span>
                             
                             {/* Req 1: Zoom Button */}
                             <button 
@@ -893,6 +975,9 @@ type ComparisonVirtualRowCtx = {
   handleSourceChange: (id: string, text: string) => void;
   handleSplitSourceSegment: (segmentId: string, leftSource: string, rightSource: string) => void;
   handleSegmentChange: (id: string, newText: string) => void;
+  handleApplySourceRunFormat: (seg: Segment, runId: string, style: InlineRunStyle) => void;
+  ctrlKeyHeld: boolean;
+  hasTargetTextSelection: boolean;
   confirmSegment: (segment: Segment) => void;
   toggleSegmentLock: (segmentId: string) => void;
   handleAiTranslate: (segment: Segment) => void | Promise<void>;
@@ -935,6 +1020,9 @@ function ComparisonVirtualRow({
     handleSourceChange,
     handleSplitSourceSegment,
     handleSegmentChange,
+    handleApplySourceRunFormat,
+    ctrlKeyHeld,
+    hasTargetTextSelection,
     confirmSegment,
     toggleSegmentLock,
     handleAiTranslate,
@@ -966,6 +1054,11 @@ function ComparisonVirtualRow({
   const rowMinH = 'min-h-[4rem]';
   const motionCls = reduceMotion ? '' : 'transition-all duration-75';
   const chkAnim = reduceMotion ? '' : 'animate-in zoom-in-50 duration-200';
+  const formatPickActive =
+    isActive &&
+    ctrlKeyHeld &&
+    hasTargetTextSelection &&
+    segmentHasCopyableSourceFormat(seg.sourceText, seg.inlineRunMeta);
 
   return (
     <div
@@ -1010,7 +1103,21 @@ function ComparisonVirtualRow({
         editorTheme={editorTheme}
         onSelectSource={(text) => handleEditorTextSelection(text, 'source')}
         allTerms={allTerms}
+        onTermInsert={
+          isActive && !seg.isLocked
+            ? (t) => {
+                const cur = seg.targetText || '';
+                handleSegmentChange(seg.id, cur ? `${cur} ${t}` : t);
+              }
+            : undefined
+        }
         locationCaption={showSourceLocationCaption ? locationLabel : undefined}
+        formatPickActive={formatPickActive}
+        onSourceRunFormatPick={
+          formatPickActive
+            ? (runId, style) => handleApplySourceRunFormat(seg, runId, style)
+            : undefined
+        }
       />
 
       <div className="w-20 shrink-0 bg-slate-50 border-r border-slate-200 flex flex-col items-center justify-center gap-1.5 select-none">
@@ -1073,10 +1180,13 @@ export const Editor: React.FC<EditorProps> = ({
     knowledgeBases = [],
     onKnowledgeBasesChange,
     embeddingSettings = DEFAULT_EMBEDDING_SETTINGS,
+    mtReferenceSettings = DEFAULT_MT_REFERENCE_SETTINGS,
+    onUpdateMtReferenceSettings,
     grammarRuleBooks = [],
     regexDictionaryBooks = [],
     dictionaryQueryResolverRef,
     editorDictionaryOpenerRef,
+    editorMtReferenceOpenerRef,
     customOnlineDictionaries = [],
     resumeSegmentId = null,
     resumeLayoutKey = 0,
@@ -1271,6 +1381,18 @@ export const Editor: React.FC<EditorProps> = ({
   const [batchPrompt, setBatchPrompt] = useState('');
   const [batchProgress, setBatchProgress] = useState({ current: 0, total: 0 });
   const [batchStats, setBatchStats] = useState({ succeeded: 0, failed: 0 });
+  const [batchStrategy, setBatchStrategy] = useState<PreTranslateStrategy>('tmMtLlm');
+  const [batchFuzzyThreshold, setBatchFuzzyThreshold] = useState(75);
+  const [batchSourceStats, setBatchSourceStats] = useState<PreTranslateBatchStats | null>(null);
+  const [isProofreadModalOpen, setIsProofreadModalOpen] = useState(false);
+  const [proofreadProgress, setProofreadProgress] = useState({ current: 0, total: 0 });
+  const [proofreadStats, setProofreadStats] = useState<ProofreadBatchStats | null>(null);
+  const [isProofreadRunning, setIsProofreadRunning] = useState(false);
+  const proofreadCancelRef = useRef(0);
+  const [quickMtOpen, setQuickMtOpen] = useState(false);
+  const [quickMtSource, setQuickMtSource] = useState('');
+  const idlePrefetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [tmMatches, setTmMatches] = useState<TmMatchHit[]>([]);
   /** 关闭弹窗时递增；进行中任务捕获启动时的代数，用于可靠取消（含快速重开弹窗） */
   const batchModalCancelGenerationRef = useRef(0);
 
@@ -1289,6 +1411,7 @@ export const Editor: React.FC<EditorProps> = ({
 
   // Text Selection Tracking for Replacement and Concordance
   const [textSelection, setTextSelection] = useState<{start: number, end: number}>({ start: 0, end: 0 });
+  const [ctrlKeyHeld, setCtrlKeyHeld] = useState(false);
   const [currentSelectedText, setCurrentSelectedText] = useState('');
   const [dictPanelOpen, setDictPanelOpen] = useState(false);
   const [dictPanelCollapsed, setDictPanelCollapsed] = useState(false);
@@ -1301,9 +1424,49 @@ export const Editor: React.FC<EditorProps> = ({
       setDictProviderId('youdao');
     }
   }, [customOnlineDictionaries, dictProviderId]);
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.ctrlKey) setCtrlKeyHeld(true);
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (!e.ctrlKey) setCtrlKeyHeld(false);
+    };
+    const onBlur = () => setCtrlKeyHeld(false);
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', onBlur);
+    };
+  }, []);
   const [dictAutoLookup, setDictAutoLookup] = useState(readDictionaryAutoLookupEnabled);
   const dictLookupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastAutoDictQueryRef = useRef('');
+  const [bottomPanelTab, setBottomPanelTab] = useState<EditorBottomPanelTab>('dictionary');
+  const [mtTranslatorId, setMtTranslatorId] = useState(mtReferenceSettings.defaultTranslator);
+  const [mtLoading, setMtLoading] = useState(false);
+  const [mtError, setMtError] = useState<string | null>(null);
+  const [mtResult, setMtResult] = useState<string | null>(null);
+  const [mtElapsedMs, setMtElapsedMs] = useState<number | null>(null);
+  const [mtCompareResults, setMtCompareResults] = useState<MtCompareResultItem[]>([]);
+  const [mtCompareSelectedId, setMtCompareSelectedId] = useState<string | null>(null);
+  const [mtCompareModalOpen, setMtCompareModalOpen] = useState(false);
+
+  const mtTranslatorOptions = useMemo(
+    () => MT_TRANSLATOR_OPTIONS.filter((o) => mtReferenceSettings.enabledTranslators.includes(o.id)),
+    [mtReferenceSettings.enabledTranslators]
+  );
+
+  useEffect(() => {
+    if (!mtTranslatorOptions.some((o) => o.id === mtTranslatorId)) {
+      const fallback =
+        mtTranslatorOptions.find((o) => o.id === mtReferenceSettings.defaultTranslator) ??
+        mtTranslatorOptions[0];
+      if (fallback) setMtTranslatorId(fallback.id);
+    }
+  }, [mtTranslatorOptions, mtTranslatorId, mtReferenceSettings.defaultTranslator]);
 
   const resolveDictionaryQuery = useCallback((): string => {
     const sel = window.getSelection()?.toString().trim() || currentSelectedText.trim();
@@ -1314,12 +1477,131 @@ export const Editor: React.FC<EditorProps> = ({
     return (seg?.sourceText ?? '').trim();
   }, [project, activeFileId, activeSegmentId, currentSelectedText]);
 
+  /** 句段切换自动 MT：始终用当前句原文，不受划选影响 */
+  const resolveSegmentSourceQuery = useCallback((): string => {
+    if (!project || !activeSegmentId) return '';
+    const file = project.files.find((f) => f.id === activeFileId) || project.files[0];
+    const seg = file?.segments.find((s) => s.id === activeSegmentId);
+    return (seg?.sourceText ?? '').trim().replace(/\s+/g, ' ');
+  }, [project, activeFileId, activeSegmentId]);
+
   const openDictionaryWithQuery = useCallback((raw: string, compact = false) => {
     const q = raw.trim().replace(/\s+/g, ' ');
+    setBottomPanelTab('dictionary');
     setDictQuery(q);
     setDictPanelOpen(true);
     setDictPanelCollapsed(compact);
   }, []);
+
+  const openMtCompareModalWithQuery = useCallback(
+    (raw: string) => {
+      const q = raw.trim().replace(/\s+/g, ' ');
+      setDictQuery(q);
+      setMtCompareModalOpen(true);
+      if (!mtReferenceSettings.compareMode) {
+        onUpdateMtReferenceSettings?.({
+          ...mtReferenceSettings,
+          compareMode: true,
+        });
+      }
+    },
+    [mtReferenceSettings, onUpdateMtReferenceSettings]
+  );
+
+  const openMtReferenceWithQuery = useCallback(
+    (raw: string, compact = false) => {
+      const q = raw.trim().replace(/\s+/g, ' ');
+      setDictQuery(q);
+      if (mtReferenceSettings.compareMode) {
+        setMtCompareModalOpen(true);
+        return;
+      }
+      setBottomPanelTab('mt');
+      setDictPanelOpen(true);
+      setDictPanelCollapsed(compact);
+    },
+    [mtReferenceSettings.compareMode]
+  );
+
+  const runMtReferenceLookup = useCallback(
+    async (rawQuery?: string) => {
+      if (!mtReferenceSettings.enabled) return;
+      const q = (rawQuery ?? (dictQuery.trim() || resolveSegmentSourceQuery()))
+        .trim()
+        .replace(/\s+/g, ' ');
+      if (!q || !project) {
+        setMtResult(null);
+        setMtError(null);
+        setMtCompareResults([]);
+        return;
+      }
+
+      if (mtReferenceSettings.compareMode) {
+        const ids = (mtReferenceSettings.compareTranslators ?? [])
+          .filter((id) => mtReferenceSettings.enabledTranslators.includes(id))
+          .slice(0, MT_COMPARE_MAX);
+        if (ids.length === 0) {
+          setMtCompareResults([]);
+          setMtError('请至少选择一个对比引擎');
+          return;
+        }
+        setMtLoading(true);
+        setMtError(null);
+        setMtResult(null);
+        setMtElapsedMs(null);
+        setMtCompareResults(
+          ids.map((id) => ({
+            translatorId: id,
+            label: mtTranslatorLabel(id),
+            status: 'loading' as const,
+          }))
+        );
+        try {
+          const rows = await fetchMtReferenceCompare(
+            q,
+            ids,
+            project.sourceLang,
+            project.targetLang,
+            mtReferenceSettings
+          );
+          setMtCompareResults(rows);
+          const firstOk = rows.find((r) => r.status === 'ok');
+          setMtCompareSelectedId((prev) =>
+            prev && rows.some((r) => r.translatorId === prev && r.status === 'ok')
+              ? prev
+              : firstOk?.translatorId ?? ids[0]
+          );
+        } finally {
+          setMtLoading(false);
+        }
+        return;
+      }
+
+      setMtCompareResults([]);
+      setMtLoading(true);
+      setMtError(null);
+      try {
+        const r = await fetchMtReference(
+          q,
+          mtTranslatorId,
+          project.sourceLang,
+          project.targetLang,
+          mtReferenceSettings
+        );
+        if (r.ok) {
+          setMtResult(r.text ?? '');
+          setMtElapsedMs(r.elapsedMs ?? null);
+        } else {
+          setMtResult(null);
+          setMtElapsedMs(null);
+          setMtError(r.error ?? '查询失败');
+        }
+      } finally {
+        setMtLoading(false);
+      }
+    },
+    [mtReferenceSettings, mtTranslatorId, project, dictQuery, resolveSegmentSourceQuery]
+  );
 
   const scheduleDictionaryLookup = useCallback(
     (raw: string) => {
@@ -1358,6 +1640,64 @@ export const Editor: React.FC<EditorProps> = ({
     };
   }, []);
 
+  useEffect(() => {
+    if (!mtReferenceSettings.enabled || !mtReferenceSettings.autoLookupOnSegmentChange) return;
+    if (!activeSegmentId) return;
+    const q = resolveSegmentSourceQuery();
+    if (!q) return;
+    setCurrentSelectedText('');
+    openMtReferenceWithQuery(q, false);
+  }, [
+    activeSegmentId,
+    activeFileId,
+    mtReferenceSettings.enabled,
+    mtReferenceSettings.autoLookupOnSegmentChange,
+    resolveSegmentSourceQuery,
+    openMtReferenceWithQuery,
+  ]);
+
+  useEffect(() => {
+    if (!mtReferenceSettings.enabled) return;
+    const modalActive = mtCompareModalOpen && mtReferenceSettings.compareMode;
+    const panelActive =
+      bottomPanelTab === 'mt' && dictPanelOpen && !mtReferenceSettings.compareMode;
+    if (!modalActive && !panelActive) return;
+    const q = dictQuery.trim() || resolveSegmentSourceQuery();
+    if (q) void runMtReferenceLookup(q);
+  }, [
+    mtCompareModalOpen,
+    bottomPanelTab,
+    dictPanelOpen,
+    dictQuery,
+    mtTranslatorId,
+    activeSegmentId,
+    mtReferenceSettings.enabled,
+    mtReferenceSettings.compareMode,
+    mtReferenceSettings.compareTranslators,
+    resolveSegmentSourceQuery,
+    runMtReferenceLookup,
+  ]);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!mtReferenceSettings.enabled) return;
+      if (!e.ctrlKey && !e.metaKey) return;
+      if (e.key.toLowerCase() !== 'm' || !e.shiftKey) return;
+      const t = e.target as HTMLElement | null;
+      if (t?.closest('select')) return;
+      if (t instanceof HTMLInputElement && t.type !== 'checkbox' && t.type !== 'radio') return;
+      e.preventDefault();
+      const q = resolveSegmentSourceQuery();
+      openMtReferenceWithQuery(q, false);
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [
+    mtReferenceSettings.enabled,
+    resolveSegmentSourceQuery,
+    openMtReferenceWithQuery,
+  ]);
+
   /** 标题栏「在线词典」/ Ctrl+D：解析当前宜检索的字符串 */
   useEffect(() => {
     if (!dictionaryQueryResolverRef) return;
@@ -1374,6 +1714,7 @@ export const Editor: React.FC<EditorProps> = ({
   useEffect(() => {
     if (!editorDictionaryOpenerRef) return;
     editorDictionaryOpenerRef.current = () => {
+      setBottomPanelTab('dictionary');
       setDictPanelOpen(true);
       setDictPanelCollapsed(false);
     };
@@ -1381,6 +1722,23 @@ export const Editor: React.FC<EditorProps> = ({
       editorDictionaryOpenerRef.current = null;
     };
   }, [editorDictionaryOpenerRef]);
+
+  useEffect(() => {
+    if (!editorMtReferenceOpenerRef) return;
+    editorMtReferenceOpenerRef.current = () => {
+      if (!mtReferenceSettings.enabled) return;
+      const q = resolveSegmentSourceQuery();
+      openMtReferenceWithQuery(q, false);
+    };
+    return () => {
+      editorMtReferenceOpenerRef.current = null;
+    };
+  }, [
+    editorMtReferenceOpenerRef,
+    mtReferenceSettings.enabled,
+    resolveSegmentSourceQuery,
+    openMtReferenceWithQuery,
+  ]);
 
   useEffect(() => {
     if (!showQuickSymbolMenu) return;
@@ -1476,6 +1834,12 @@ export const Editor: React.FC<EditorProps> = ({
   const activeSegment = activeSegmentLoc
       ? activeSegmentLoc.file.segments[activeSegmentLoc.segmentIndex]
       : undefined;
+
+  const hasTargetTextSelection = (() => {
+    const live = readActivePlainTextSelection();
+    if (live && live.start < live.end) return true;
+    return textSelection.start < textSelection.end;
+  })();
 
   // Aggregated TMs and TBs for reading
   const allTMs = useMemo(() => {
@@ -1579,6 +1943,21 @@ export const Editor: React.FC<EditorProps> = ({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [allTMs, currentSelectedText, activeSegment]);
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.key.toLowerCase() === 'm') {
+        e.preventDefault();
+        const text = currentSelectedText.trim() || activeSegment?.sourceText?.trim() || '';
+        if (text) {
+          setQuickMtSource(text);
+          setQuickMtOpen(true);
+        }
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [currentSelectedText, activeSegment?.sourceText]);
+
   const performConcordanceSearch = (query: string) => {
       if (!allTMs.length || !query.trim()) {
           setConcordanceResults([]);
@@ -1595,16 +1974,8 @@ export const Editor: React.FC<EditorProps> = ({
       setConcordanceResults(results);
   };
 
-  // Refined TM Matches with Fuzzy Score (Context Matching) from ALL TMs
-  const tmMatches = useMemo(() => {
-    if (!activeSegment || !allTMs.length) return [];
-    
-    return allTMs.flatMap(tm => 
-        tm.units.map(u => ({ ...u, score: calculateMatchScoreValue(activeSegment.sourceText, u.source), sourceTM: tm.name }))
-    )
-    .filter(u => u.score >= 50) 
-    .sort((a, b) => b.score - a.score);
-  }, [activeSegment, allTMs]);
+  // TM matches loaded via indexed search API (fallback in-memory)
+  // state: tmMatches — populated in effect after filteredSegments
 
   // --- Auto-fill Logic for 100% Matches ---
   useEffect(() => {
@@ -1617,17 +1988,21 @@ export const Editor: React.FC<EditorProps> = ({
           if (!newProcessedIds.has(seg.id) && !seg.targetText?.trim()) {
               // Check exact match in ANY TM
               for (const tm of allTMs) {
-                 const exactMatch = tm.units.find(u => u.source === seg.sourceText);
+                 const exactMatch = tm.units.find(u => sourcesEqual(u.source, seg.sourceText));
                  if (exactMatch) {
                     hasChanges = true;
                     newProcessedIds.add(seg.id);
-                    return {
+                    return applyTagFormatQaToSegment(
+                      {
                         ...seg,
                         targetText: exactMatch.target,
-                        status: SegmentStatus.Translated,
+                        status: SegmentStatus.PreTranslated,
                         matchType: MatchType.Exact,
-                        matchScore: 100
-                    };
+                        matchScore: 100,
+                      },
+                      activeFile,
+                      exactMatch.target
+                    );
                  }
               }
               // Even if no match found, mark as processed to avoid rechecking
@@ -1651,19 +2026,23 @@ export const Editor: React.FC<EditorProps> = ({
           if (!processedSegmentIds.has(activeSegmentId)) {
               // Check exact match in ANY TM
               for (const tm of allTMs) {
-                 const exactMatch = tm.units.find(u => u.source === activeSegment.sourceText);
+                 const exactMatch = tm.units.find(u => sourcesEqual(u.source, activeSegment.sourceText));
                  if (exactMatch) {
                       const loc = findSegmentLocation(activeSegmentId);
                       if (!loc) break;
                       const { file } = loc;
                       const updated = file.segments.map(s => 
-                          s.id === activeSegmentId ? {
-                              ...s,
-                              targetText: exactMatch.target,
-                              status: SegmentStatus.Translated,
-                              matchType: MatchType.Exact,
-                              matchScore: 100
-                          } : s
+                          s.id === activeSegmentId ? applyTagFormatQaToSegment(
+                              {
+                                  ...s,
+                                  targetText: exactMatch.target,
+                                  status: SegmentStatus.PreTranslated,
+                                  matchType: MatchType.Exact,
+                                  matchScore: 100,
+                              },
+                              file,
+                              exactMatch.target
+                          ) : s
                       );
                       onUpdateFileSegments(file.id, updated);
                       // Mark segment as processed
@@ -1686,6 +2065,25 @@ export const Editor: React.FC<EditorProps> = ({
           }
       }
   }, [activeSegmentId, activeSegment, allTMs, onUpdateFileSegments, processedSegmentIds, findSegmentLocation]); 
+
+  // Backfill tag-format QA when focusing a segment (e.g. TM auto-fill or legacy data).
+  useEffect(() => {
+      if (!activeSegmentId || !activeFile) return;
+      const loc = findSegmentLocation(activeSegmentId);
+      if (!loc) return;
+      const { file, segmentIndex } = loc;
+      const seg = file.segments[segmentIndex];
+      if (!seg?.targetText?.trim()) return;
+      if (!shouldRunTagFormatQa(file, seg)) return;
+      if (seg.qaIssues?.some((i) => i.category === 'tags')) return;
+
+      const { qaIssues } = withTagFormatQaIssues(seg, file, seg.targetText);
+      if (!qaIssues?.some((i) => i.category === 'tags')) return;
+
+      const updatedSegments = [...file.segments];
+      updatedSegments[segmentIndex] = { ...seg, qaIssues };
+      onUpdateFileSegments(file.id, updatedSegments);
+  }, [activeSegmentId, activeFile, findSegmentLocation, onUpdateFileSegments]);
 
   useEffect(() => {
     if (activeSegmentId && activeRowRef.current) {
@@ -1793,12 +2191,16 @@ export const Editor: React.FC<EditorProps> = ({
       if (sortMode !== 'natural') {
           result = [...result].sort((a, b) => {
               if (sortMode === 'status') {
-                  const statusWeight = {
+                  const statusWeight: Record<SegmentStatus, number> = {
                       [SegmentStatus.NotStarted]: 0,
                       [SegmentStatus.Draft]: 1,
-                      [SegmentStatus.Translated]: 2,
-                      [SegmentStatus.Review]: 3,
-                      [SegmentStatus.Confirmed]: 4
+                      [SegmentStatus.PreTranslated]: 2,
+                      [SegmentStatus.Translated]: 3,
+                      [SegmentStatus.Review]: 4,
+                      [SegmentStatus.Proofread]: 5,
+                      [SegmentStatus.Confirmed]: 6,
+                      [SegmentStatus.Approved]: 7,
+                      [SegmentStatus.Rejected]: 8,
                   };
                   return statusWeight[a.status] - statusWeight[b.status];
               }
@@ -1813,6 +2215,36 @@ export const Editor: React.FC<EditorProps> = ({
       }
       return result;
   }, [project, project.sourceLang, activeFile, activeFile.segments, filterStatus, textSearchQuery, textSearchMode, textSearchScope, sortMode]);
+
+  useEffect(() => {
+    if (!activeSegment?.sourceText?.trim() || !allTMs.length) {
+      setTmMatches([]);
+      return;
+    }
+    let cancelled = false;
+    void searchTmMatches(activeSegment.sourceText, allTMs, 50, 20).then((hits) => {
+      if (!cancelled) setTmMatches(hits);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSegment?.id, activeSegment?.sourceText, allTMs]);
+
+  useEffect(() => {
+    if (idlePrefetchTimerRef.current) clearTimeout(idlePrefetchTimerRef.current);
+    if (!activeFile || !allTMs.length || !activeSegmentId) return;
+    idlePrefetchTimerRef.current = setTimeout(() => {
+      const idx = filteredSegments.findIndex((s) => s.id === activeSegmentId);
+      if (idx < 0) return;
+      const next = filteredSegments
+        .slice(idx + 1, idx + 6)
+        .map((s) => ({ id: s.id, sourceText: s.sourceText }));
+      prefetchTmMatches(next, allTMs);
+    }, 1500);
+    return () => {
+      if (idlePrefetchTimerRef.current) clearTimeout(idlePrefetchTimerRef.current);
+    };
+  }, [activeSegmentId, activeFile, allTMs, filteredSegments]);
 
   const dynamicRowHeight = useDynamicRowHeight({
     defaultRowHeight: 140,
@@ -2121,34 +2553,76 @@ export const Editor: React.FC<EditorProps> = ({
       const prev = file.segments[segmentIndex];
       const updatedSegments = [...file.segments];
 
-      let qaIssues = (prev.qaIssues ?? []).filter((i) => i.category !== 'tags');
-      if (file.interchangeFormat === 'sdlxliff') {
-        const tagCheck = validateSdlMarkers(prev.sourceText, newText);
-        if (!tagCheck.ok) {
-          qaIssues = [
-            ...qaIssues,
-            {
-              id: `tag-${id}`,
-              type: 'warning' as const,
-              category: 'tags',
-              message: tagCheck.message ?? '译文标签与原文不一致',
-            },
-          ];
-        }
-      }
-
       const updatedSegment = {
           ...prev,
           targetText: newText,
           status: SegmentStatus.Draft,
           matchType: MatchType.None,
           xliffModified: prev.xliffSegmentId ? true : prev.xliffModified,
-          qaIssues: qaIssues.length > 0 ? qaIssues : undefined,
+          ...withTagFormatQaIssues(prev, file, newText),
       };
       updatedSegments[segmentIndex] = updatedSegment;
       onUpdateFileSegments(file.id, updatedSegments);
   }, [findSegmentLocation, onUpdateFileSegments]);
-  
+
+  const handleApplySourceRunFormat = useCallback(
+    (seg: Segment, runId: string, runStyle: InlineRunStyle) => {
+      const location = findSegmentLocation(seg.id);
+      if (!location) return;
+      const { file, segmentIndex } = location;
+      const prev = file.segments[segmentIndex];
+      if (!prev.targetText?.trim()) return;
+
+      let plainSelection: { start: number; end: number } | null = null;
+      const liveSel = readActivePlainTextSelection();
+      if (liveSel && liveSel.start < liveSel.end) {
+        const active = document.activeElement;
+        if (active instanceof HTMLTextAreaElement && hasInlineMarkers(prev.targetText)) {
+          plainSelection = markerSelectionToPlainOffsets(
+            prev.targetText,
+            liveSel.start,
+            liveSel.end
+          );
+        } else {
+          plainSelection = liveSel;
+        }
+      } else if (seg.id === activeSegmentId && textSelection.start < textSelection.end) {
+        if (hasInlineMarkers(prev.targetText)) {
+          plainSelection = markerSelectionToPlainOffsets(
+            prev.targetText,
+            textSelection.start,
+            textSelection.end
+          );
+        } else {
+          plainSelection = {
+            start: Math.min(textSelection.start, textSelection.end),
+            end: Math.max(textSelection.start, textSelection.end),
+          };
+        }
+      }
+      if (!plainSelection) return;
+
+      const result = applyRunStyleToTargetSelection(
+        prev.targetText,
+        plainSelection,
+        runStyle,
+        prev.inlineRunMeta
+      );
+
+      const updatedSegments = [...file.segments];
+      updatedSegments[segmentIndex] = {
+        ...prev,
+        targetText: result.targetText,
+        inlineRunMeta: result.inlineRunMeta.length ? result.inlineRunMeta : prev.inlineRunMeta,
+        status: SegmentStatus.Draft,
+        matchType: MatchType.None,
+        ...withTagFormatQaIssues(prev, file, result.targetText),
+      };
+      onUpdateFileSegments(file.id, updatedSegments);
+    },
+    [findSegmentLocation, onUpdateFileSegments, activeSegmentId, textSelection]
+  );
+
   const handleSourceChange = useCallback((id: string, newText: string) => {
       const location = findSegmentLocation(id);
       if (!location) return;
@@ -2429,6 +2903,76 @@ export const Editor: React.FC<EditorProps> = ({
       }, 0);
   };
 
+  const handleCopyMtReference = useCallback(
+    (text?: string) => {
+      const t =
+        text?.trim() ||
+        (mtReferenceSettings.compareMode
+          ? mtCompareResults.find((r) => r.translatorId === mtCompareSelectedId)?.text
+          : mtResult)?.trim();
+      if (t) copyTextToClipboard(t);
+    },
+    [mtReferenceSettings.compareMode, mtCompareResults, mtCompareSelectedId, mtResult]
+  );
+
+  const handleInsertMtReference = useCallback(
+    (text?: string, mode: 'replace' | 'insert-at-cursor' = 'replace') => {
+      const t =
+        text?.trim() ||
+        (mtReferenceSettings.compareMode
+          ? mtCompareResults.find((r) => r.translatorId === mtCompareSelectedId)?.text
+          : mtResult)?.trim();
+      if (!t || !activeSegmentId || !activeSegment || activeSegment.isLocked) return;
+
+      if (mode === 'insert-at-cursor') {
+        const currentText = activeSegment.targetText || '';
+        let { start, end } = textSelection;
+        start = Math.min(Math.max(0, start), currentText.length);
+        end = Math.min(Math.max(0, end), currentText.length);
+        if (start > end) [start, end] = [end, start];
+        const newText = currentText.slice(0, start) + t + currentText.slice(end);
+        handleSegmentChange(activeSegmentId, newText);
+        const newPos = start + t.length;
+        setTextSelection({ start: newPos, end: newPos });
+        setTimeout(() => {
+          const el = activeTargetTextareaRef.current;
+          if (!el) return;
+          try {
+            el.focus();
+            el.setSelectionRange(newPos, newPos);
+          } catch {
+            /* ignore */
+          }
+        }, 0);
+        return;
+      }
+
+      handleSegmentChange(activeSegmentId, t);
+      const cursorPos = t.length;
+      setTextSelection({ start: cursorPos, end: cursorPos });
+      setTimeout(() => {
+        const el = activeTargetTextareaRef.current;
+        if (!el) return;
+        try {
+          el.focus();
+          el.setSelectionRange(cursorPos, cursorPos);
+        } catch {
+          /* ignore */
+        }
+      }, 0);
+    },
+    [
+      mtReferenceSettings.compareMode,
+      mtCompareResults,
+      mtCompareSelectedId,
+      mtResult,
+      activeSegmentId,
+      activeSegment,
+      textSelection,
+      handleSegmentChange,
+    ]
+  );
+
   const handleAddEditorQuickSymbol = () => {
       const t = quickSymbolNewInput.trim().slice(0, EDITOR_QUICK_SYMBOL_CHAR_MAX);
       if (!t) return;
@@ -2506,30 +3050,73 @@ export const Editor: React.FC<EditorProps> = ({
       }, 0);
   }, [activeSegmentId, activeSegment, textSelection, handleSegmentChange]);
 
-  const handleClearTargetScriptFormatting = useCallback(() => {
+  const handleClearTargetFormatting = useCallback(() => {
       if (!activeSegmentId || !activeSegment || activeSegment.isLocked) return;
-      const currentText = activeSegment.targetText || '';
-      let { start, end } = textSelection;
-      start = Math.min(Math.max(0, start), currentText.length);
-      end = Math.min(Math.max(0, end), currentText.length);
-      if (start > end) [start, end] = [end, start];
+      const location = findSegmentLocation(activeSegmentId);
+      if (!location) return;
+      const { file, segmentIndex } = location;
+      const prev = file.segments[segmentIndex];
+      const currentText = prev.targetText || '';
+
+      let plainSel: { start: number; end: number } | null = null;
+      const liveSel = readTargetEditorPlainSelection(
+        activeTargetTextareaRef.current,
+        hasInlineMarkers(currentText)
+          ? (start, end) => markerSelectionToPlainOffsets(currentText, start, end)
+          : undefined
+      );
+      if (liveSel) {
+        plainSel = liveSel;
+      } else if (textSelection.start < textSelection.end) {
+        if (hasInlineMarkers(currentText)) {
+          plainSel = markerSelectionToPlainOffsets(
+            currentText,
+            textSelection.start,
+            textSelection.end
+          );
+        } else {
+          plainSel = {
+            start: Math.min(textSelection.start, textSelection.end),
+            end: Math.max(textSelection.start, textSelection.end),
+          };
+        }
+      }
 
       let newText: string;
       let selStart: number;
       let selEnd: number;
+      const plainBefore = stripInlineMarkers(currentText);
 
-      if (start !== end) {
-          const stripped = stripScriptFormatting(currentText.slice(start, end));
-          newText = currentText.slice(0, start) + stripped + currentText.slice(end);
-          selStart = start;
-          selEnd = start + stripped.length;
+      if (plainSel) {
+        newText = clearFormattingInPlainRange(currentText, plainSel);
+        const clearedMiddle = stripScriptFormatting(
+          plainBefore.slice(plainSel.start, plainSel.end)
+        );
+        selStart = plainSel.start;
+        selEnd = plainSel.start + clearedMiddle.length;
       } else {
-          newText = stripScriptFormatting(currentText);
-          selStart = newText.length;
-          selEnd = newText.length;
+        newText = clearAllTargetFormatting(currentText);
+        selStart = stripInlineMarkers(newText).length;
+        selEnd = selStart;
       }
 
-      handleSegmentChange(activeSegmentId, newText);
+      const inlineRunMeta = pruneInlineRunMeta(
+        newText,
+        prev.sourceText || '',
+        prev.inlineRunMeta
+      );
+      const updatedSegments = [...file.segments];
+      updatedSegments[segmentIndex] = {
+        ...prev,
+        targetText: newText,
+        inlineRunMeta: inlineRunMeta ?? prev.inlineRunMeta,
+        status: SegmentStatus.Draft,
+        matchType: MatchType.None,
+        xliffModified: prev.xliffSegmentId ? true : prev.xliffModified,
+        ...withTagFormatQaIssues(prev, file, newText),
+      };
+      onUpdateFileSegments(file.id, updatedSegments);
+
       setTextSelection({ start: selStart, end: selEnd });
       setTimeout(() => {
           const el = activeTargetTextareaRef.current;
@@ -2541,7 +3128,14 @@ export const Editor: React.FC<EditorProps> = ({
               /* ignore */
           }
       }, 0);
-  }, [activeSegmentId, activeSegment, textSelection, handleSegmentChange]);
+  }, [
+      activeSegmentId,
+      activeSegment,
+      textSelection,
+      findSegmentLocation,
+      onUpdateFileSegments,
+      activeTargetTextareaRef,
+  ]);
 
   const confirmSegment = useCallback((segment: Segment) => {
       const location = findSegmentLocation(segment.id);
@@ -2974,6 +3568,11 @@ export const Editor: React.FC<EditorProps> = ({
   };
 
   const handleAiTranslate = async (segment: Segment) => {
+      const readinessError = getAIReadinessError(aiSettings);
+      if (readinessError) {
+          alert(readinessError);
+          return;
+      }
       setIsAiProcessing(true);
       try {
           const ragContext = await buildRagContextStringAsync(
@@ -2992,12 +3591,12 @@ export const Editor: React.FC<EditorProps> = ({
           const location = findSegmentLocation(segment.id);
           if (!location) return;
           const { file } = location;
-          const updated = file.segments.map(s => s.id === segment.id ? {
+          const updated = file.segments.map(s => s.id === segment.id ? applyTagFormatQaToSegment({
               ...s,
               targetText: translated,
               status: SegmentStatus.Translated,
               matchType: MatchType.AI
-          } : s);
+          }, file, translated) : s);
           onUpdateFileSegments(file.id, updated);
       } catch (e) {
           alert(e instanceof Error ? e.message : String(e));
@@ -3043,12 +3642,16 @@ export const Editor: React.FC<EditorProps> = ({
               );
               const segIndex = currentSegments.findIndex((s) => s.id === seg.id);
               if (segIndex !== -1) {
-                  currentSegments[segIndex] = {
-                      ...currentSegments[segIndex],
-                      targetText: result,
-                      status: SegmentStatus.Translated,
-                      matchType: MatchType.AI,
-                  };
+                  currentSegments[segIndex] = applyTagFormatQaToSegment(
+                      {
+                          ...currentSegments[segIndex],
+                          targetText: result,
+                          status: SegmentStatus.Translated,
+                          matchType: MatchType.AI,
+                      },
+                      activeFile,
+                      result
+                  );
               }
               if (currentIndex % 3 === 0 || currentIndex === targets.length) {
                   onUpdateFileSegments(activeFile.id, [...currentSegments]);
@@ -3140,12 +3743,8 @@ export const Editor: React.FC<EditorProps> = ({
 
   // --- Batch Pre-Translate Logic ---
   const handleOpenBatchModal = () => {
-      const readinessError = getAIReadinessError(aiSettings);
-      if (readinessError) {
-          alert(readinessError);
-          return;
-      }
       setBatchStep('mode-select');
+      setBatchSourceStats(null);
       setIsBatchModalOpen(true);
       setBatchPrompt('');
       setBatchProgress({ current: 0, total: 0 });
@@ -3186,17 +3785,17 @@ export const Editor: React.FC<EditorProps> = ({
   };
 
   const executeBatchTranslation = async (useSmartPrompt: boolean) => {
-      const readinessError = getAIReadinessError(aiSettings);
-      if (readinessError) {
-          alert(readinessError);
+      const strategy: PreTranslateStrategy = useSmartPrompt ? 'tmMtLlm' : batchStrategy;
+      if ((strategy === 'tmMtLlm' || strategy === 'tmLlm' || strategy === 'llmOnly') && getAIReadinessError(aiSettings)) {
+          alert(getAIReadinessError(aiSettings));
           handleBatchModalClose();
           return;
       }
       const runGen = batchModalCancelGenerationRef.current;
       setBatchStep('processing');
-      // 预翻译仅处理未翻译且未锁定句段
+      setBatchSourceStats(null);
       const targets = activeFile.segments.filter(
-          s => (!s.targetText || s.targetText.trim() === '') && !s.isLocked
+          (s) => (!s.targetText || s.targetText.trim() === '') && !s.isLocked
       );
       setBatchProgress({ current: 0, total: targets.length });
 
@@ -3205,85 +3804,91 @@ export const Editor: React.FC<EditorProps> = ({
           return;
       }
 
-      const contextToUse = useSmartPrompt ? batchPrompt : (project.contextDescription || "");
-      const CONCURRENCY_LIMIT = 3;
-      let activePromises: Promise<any>[] = [];
-      let currentIndex = 0;
-      let succeeded = 0;
-      let failed = 0;
-      let currentSegments = [...activeFile.segments];
+      const contextToUse = useSmartPrompt ? batchPrompt : (project.contextDescription || '');
 
-      const batchRunStale = () => runGen !== batchModalCancelGenerationRef.current;
-
-      const processNext = async () => {
-          if (batchRunStale()) return;
-          if (currentIndex >= targets.length) return;
-          const seg = targets[currentIndex];
-          currentIndex++;
-          try {
-              if (batchRunStale()) return;
-              const ragContext = await buildRagContextStringAsync(
-                  seg.sourceText,
-                  knowledgeBases,
-                  project.id,
-                  embeddingSettings
-              );
-
-              if (batchRunStale()) return;
-
-              const result = await translateWithOptionalGrammarRules(
-                  seg.sourceText,
-                  contextToUse,
-                  ragContext
-              );
-              if (batchRunStale()) return;
-
-              const segIndex = currentSegments.findIndex(s => s.id === seg.id);
-              if (segIndex !== -1) {
-                  currentSegments[segIndex] = {
-                      ...currentSegments[segIndex],
-                      targetText: result,
-                      status: SegmentStatus.Translated,
-                      matchType: MatchType.AI
-                  };
-              }
-              if (currentIndex % 3 === 0 || currentIndex === targets.length) {
-                   onUpdateFileSegments(activeFile.id, [...currentSegments]);
-              }
-              succeeded++;
-          } catch (e) {
-              if (!batchRunStale()) failed++;
-          } finally {
-              setBatchProgress(prev => ({
-                  ...prev,
-                  current: Math.min(prev.current + 1, prev.total),
-              }));
-              if (!batchRunStale()) {
-                  setBatchStats({ succeeded, failed });
-              }
-          }
-      };
-
-      while (activePromises.length > 0 || (currentIndex < targets.length && !batchRunStale())) {
-          while (
-              !batchRunStale() &&
-              activePromises.length < CONCURRENCY_LIMIT &&
-              currentIndex < targets.length
-          ) {
-              const p = processNext().then(() => {
-                  activePromises.splice(activePromises.indexOf(p), 1);
+      try {
+          const { segments: updated, stats } = await runPreTranslateBatch(
+              activeFile.segments,
+              {
+                  strategy,
+                  fuzzyThreshold: batchFuzzyThreshold,
+                  contextDescription: contextToUse,
+                  aiSettings,
+                  mtSettings: mtReferenceSettings,
+                  sourceLang: project.sourceLang,
+                  targetLang: project.targetLang,
+                  tms: allTMs,
+                  grammarRulesSorted,
+                  regexCategoryMap,
+                  uncategorizedRegexEntries,
+                  allTerms,
+                  buildRagContext:
+                      strategy === 'tmMtLlm' || strategy === 'tmLlm' || strategy === 'llmOnly'
+                          ? (source) =>
+                                buildRagContextStringAsync(
+                                    source,
+                                    knowledgeBases,
+                                    project.id,
+                                    embeddingSettings
+                                )
+                          : undefined,
+              },
+              (current, total) => setBatchProgress({ current, total }),
+              () => runGen !== batchModalCancelGenerationRef.current
+          );
+          if (runGen === batchModalCancelGenerationRef.current) {
+              onUpdateFileSegments(activeFile.id, updated);
+              setBatchSourceStats(stats);
+              setBatchStats({
+                  succeeded: stats.tm + stats.fuzzy + stats.mt + stats.llm,
+                  failed: stats.failed,
               });
-              activePromises.push(p);
+              setBatchStep('done');
           }
-          if (activePromises.length === 0) break;
-          await Promise.race(activePromises);
+      } catch (e) {
+          console.error(e);
+          if (runGen === batchModalCancelGenerationRef.current) {
+              alert('批量预翻译失败，请重试');
+              handleBatchModalClose();
+          }
       }
+  };
 
-      if (batchRunStale()) {
-          onUpdateFileSegments(activeFile.id, [...currentSegments]);
+  const handleRunProofreadBatch = async () => {
+      const readinessError = getAIReadinessError(aiSettings);
+      if (readinessError) {
+          alert(readinessError);
           return;
       }
-      setBatchStep('done');
+      const runGen = proofreadCancelRef.current + 1;
+      proofreadCancelRef.current = runGen;
+      setIsProofreadModalOpen(true);
+      setIsProofreadRunning(true);
+      setProofreadStats(null);
+      const targets = activeFile.segments.filter((s) => !s.isLocked && s.targetText?.trim());
+      setProofreadProgress({ current: 0, total: targets.length });
+      try {
+          const { segments: updated, stats } = await runProofreadBatch(
+              activeFile.segments,
+              project.sourceLang,
+              project.targetLang,
+              aiSettings,
+              {
+                  contextDescription: project.contextDescription,
+                  setProofreadStatus: true,
+                  onProgress: (c, t) => setProofreadProgress({ current: c, total: t }),
+                  isCancelled: () => proofreadCancelRef.current !== runGen,
+              }
+          );
+          if (proofreadCancelRef.current === runGen) {
+              onUpdateFileSegments(activeFile.id, updated);
+              setProofreadStats(stats);
+          }
+      } finally {
+          if (proofreadCancelRef.current === runGen) {
+              setIsProofreadRunning(false);
+          }
+      }
   };
 
   // --- NEW: Batch Operations Logic ---
@@ -3727,7 +4332,8 @@ export const Editor: React.FC<EditorProps> = ({
          }
      }
      if (qaConfig.numberAccuracy) {
-         const getNums = (str: string) => str.match(/\d+/g)?.sort().join(',') || '';
+         const getNums = (str: string) =>
+             stripInlineMarkers(str).match(/\d+/g)?.sort().join(',') || '';
          if (getNums(s) !== getNums(t)) {
              issues.push({ id: `qa-num-${seg.id}`, type: 'error', category: '数字', message: '原文与译文数字不匹配' });
          }
@@ -4014,7 +4620,15 @@ export const Editor: React.FC<EditorProps> = ({
 
   const getStatusIcon = (status: SegmentStatus) => {
     switch(status) {
-        case SegmentStatus.Confirmed: return <Icons.Check className="w-5 h-5 text-green-600" strokeWidth={3} />;
+        case SegmentStatus.Confirmed:
+        case SegmentStatus.Approved:
+            return <Icons.Check className="w-5 h-5 text-green-600" strokeWidth={3} />;
+        case SegmentStatus.Proofread:
+            return <Icons.ClipboardCheck className="w-4 h-4 text-purple-600" />;
+        case SegmentStatus.PreTranslated:
+            return <Icons.Zap className="w-4 h-4 text-cyan-600" />;
+        case SegmentStatus.Rejected:
+            return <Icons.X className="w-4 h-4 text-red-600" />;
         case SegmentStatus.Translated: return <Icons.Edit className="w-4 h-4 text-blue-600" />;
         case SegmentStatus.Draft: return <Icons.Edit className="w-4 h-4 text-orange-400" />; 
         case SegmentStatus.Review: return <Icons.Search className="w-4 h-4 text-purple-500" />;
@@ -4052,6 +4666,9 @@ export const Editor: React.FC<EditorProps> = ({
     handleSourceChange,
     handleSplitSourceSegment,
     handleSegmentChange,
+    handleApplySourceRunFormat,
+    ctrlKeyHeld,
+    hasTargetTextSelection,
     confirmSegment,
     toggleSegmentLock,
     handleAiTranslate,
@@ -4377,6 +4994,13 @@ export const Editor: React.FC<EditorProps> = ({
                         >
                             <Icons.Zap className="w-4 h-4" />
                         </button>
+                        <button
+                            onClick={handleRunProofreadBatch}
+                            className="p-2 bg-purple-50 text-purple-600 hover:bg-purple-100 rounded-md transition-colors shadow-sm"
+                            title="批量 AI 校对 (Batch Proofread)"
+                        >
+                            <Icons.ClipboardCheck className="w-4 h-4" />
+                        </button>
                         
                         {/* Smart Term Extraction Button */}
                          <button 
@@ -4499,12 +5123,12 @@ export const Editor: React.FC<EditorProps> = ({
                         </button>
                         <button
                             type="button"
-                            onClick={handleClearTargetScriptFormatting}
+                            onClick={handleClearTargetFormatting}
                             disabled={!activeSegmentId || activeSegment?.isLocked}
                             className="p-2 bg-slate-50 text-slate-600 hover:bg-slate-100 rounded-md transition-colors shadow-sm border border-slate-200 disabled:opacity-40 disabled:cursor-not-allowed"
-                            title="清除格式：有选区则只还原选区内的上下标；无选区则还原整句译文（NFKC）"
+                            title="清除译文格式：有选区则清除译文选区内的所有格式；无选区则清除整句译文（不影响原文）"
                         >
-                            <Icons.RemoveFormatting className="w-4 h-4" />
+                            <Icons.Eraser className="w-4 h-4" />
                         </button>
 
                         <div className="h-4 w-px bg-slate-300 mx-1" />
@@ -4682,6 +5306,11 @@ export const Editor: React.FC<EditorProps> = ({
                             const showSourceLocationCaption =
                                 textSearchScope === 'project' && Boolean(textSearchQuery.trim()) && Boolean(locationLabel);
                             const rowMinH = 'min-h-[min(70vh,28rem)]';
+                            const formatPickActive =
+                              isActive &&
+                              ctrlKeyHeld &&
+                              hasTargetTextSelection &&
+                              segmentHasCopyableSourceFormat(seg.sourceText, seg.inlineRunMeta);
 
                             return (
                                     <div
@@ -4740,6 +5369,13 @@ export const Editor: React.FC<EditorProps> = ({
                                                 onSelectSource={(text) => handleEditorTextSelection(text, 'source')}
                                                 allTerms={allTerms}
                                                 locationCaption={showSourceLocationCaption ? locationLabel : undefined}
+                                                formatPickActive={formatPickActive}
+                                                onSourceRunFormatPick={
+                                                  formatPickActive
+                                                    ? (runId, style) =>
+                                                        handleApplySourceRunFormat(seg, runId, style)
+                                                    : undefined
+                                                }
                                             />
                                             <div className="px-3 pt-2 pb-1 text-[10px] font-bold text-slate-400 uppercase tracking-wide shrink-0 bg-slate-50/50 border-b border-slate-100">
                                                 译文
@@ -4855,6 +5491,43 @@ export const Editor: React.FC<EditorProps> = ({
                 writeDictionaryAutoLookupEnabled(enabled);
               }}
               customDictionaries={customOnlineDictionaries}
+              bottomTab={bottomPanelTab}
+              onBottomTabChange={(tab) => {
+                setBottomPanelTab(tab);
+                if (tab === 'mt') {
+                  const q = resolveSegmentSourceQuery();
+                  setDictQuery(q);
+                  if (q) void runMtReferenceLookup(q);
+                }
+              }}
+              mtReferenceEnabled={mtReferenceSettings.enabled}
+              mtTranslators={mtTranslatorOptions}
+              mtTranslatorId={mtTranslatorId}
+              onMtTranslatorChange={setMtTranslatorId}
+              mtAutoLookup={mtReferenceSettings.autoLookupOnSegmentChange}
+              onMtAutoLookupChange={(enabled) =>
+                onUpdateMtReferenceSettings?.({
+                  ...mtReferenceSettings,
+                  autoLookupOnSegmentChange: enabled,
+                })
+              }
+              mtLoading={mtLoading}
+              mtError={mtError}
+              mtResult={mtResult}
+              mtElapsedMs={mtElapsedMs}
+              onOpenMtCompareModal={() => {
+                const q = resolveSegmentSourceQuery();
+                openMtCompareModalWithQuery(q);
+              }}
+              mtTagWarning={segmentMayHaveInlineTags(
+                activeSegment?.sourceText || dictQuery
+              )}
+              mtLangPair={
+                project ? `${project.sourceLang} → ${project.targetLang}` : ''
+              }
+              onMtRefresh={() => void runMtReferenceLookup()}
+              onMtCopy={handleCopyMtReference}
+              onMtInsert={handleInsertMtReference}
             />
         </div>
 
@@ -6391,6 +7064,55 @@ export const Editor: React.FC<EditorProps> = ({
             document.body
         )}
 
+        {mtCompareModalOpen &&
+          createPortal(
+            <MtCompareModal
+              open={mtCompareModalOpen}
+              onClose={() => setMtCompareModalOpen(false)}
+              query={dictQuery}
+              langPair={project ? `${project.sourceLang} → ${project.targetLang}` : ''}
+              tagWarning={segmentMayHaveInlineTags(
+                currentSelectedText.trim() || activeSegment?.sourceText || dictQuery
+              )}
+              autoLookup={mtReferenceSettings.autoLookupOnSegmentChange}
+              onAutoLookupChange={(enabled) =>
+                onUpdateMtReferenceSettings?.({
+                  ...mtReferenceSettings,
+                  autoLookupOnSegmentChange: enabled,
+                })
+              }
+              translators={mtTranslatorOptions}
+              compareTranslators={mtReferenceSettings.compareTranslators ?? []}
+              onCompareTranslatorsChange={(ids) =>
+                onUpdateMtReferenceSettings?.({
+                  ...mtReferenceSettings,
+                  compareTranslators: ids,
+                })
+              }
+              onSwitchToSingleEngine={() => {
+                onUpdateMtReferenceSettings?.({
+                  ...mtReferenceSettings,
+                  compareMode: false,
+                });
+                setBottomPanelTab('mt');
+                setDictPanelOpen(true);
+                setDictPanelCollapsed(false);
+                const q = resolveSegmentSourceQuery();
+                setDictQuery(q);
+                if (q) void runMtReferenceLookup(q);
+              }}
+              results={mtCompareResults}
+              selectedId={mtCompareSelectedId}
+              onSelect={setMtCompareSelectedId}
+              loading={mtLoading}
+              error={mtError}
+              onRefresh={() => void runMtReferenceLookup()}
+              onCopy={handleCopyMtReference}
+              onInsert={handleInsertMtReference}
+            />,
+            document.body
+          )}
+
         {/* Batch Translation Modal - USING PORTAL */}
         {isBatchModalOpen && createPortal(
             <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
@@ -6407,6 +7129,32 @@ export const Editor: React.FC<EditorProps> = ({
 
                     {batchStep === 'mode-select' && (
                         <div className="space-y-4">
+                            <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 space-y-2">
+                                <label className="text-xs font-semibold text-slate-600 block">快速模式策略</label>
+                                <select
+                                    value={batchStrategy}
+                                    onChange={(e) => setBatchStrategy(e.target.value as PreTranslateStrategy)}
+                                    className="w-full text-sm border border-slate-300 rounded-lg px-2 py-1.5"
+                                >
+                                    <option value="tmOnly">仅 TM（100% / 模糊）</option>
+                                    <option value="tmMt">TM + MT 参考</option>
+                                    <option value="tmLlm">TM + LLM</option>
+                                    <option value="tmMtLlm">TM + MT + LLM</option>
+                                    <option value="llmOnly">仅 LLM</option>
+                                </select>
+                                <label className="text-xs text-slate-500 flex items-center gap-2">
+                                    TM 模糊阈值
+                                    <input
+                                        type="number"
+                                        min={50}
+                                        max={100}
+                                        value={batchFuzzyThreshold}
+                                        onChange={(e) => setBatchFuzzyThreshold(Number(e.target.value) || 75)}
+                                        className="w-16 border border-slate-300 rounded px-1 py-0.5 text-sm"
+                                    />
+                                    %
+                                </label>
+                            </div>
                             <button 
                                 onClick={() => executeBatchTranslation(false)}
                                 className="w-full flex items-start gap-4 p-4 rounded-xl border border-slate-200 hover:border-blue-400 hover:bg-blue-50 transition-all text-left group"
@@ -6417,7 +7165,7 @@ export const Editor: React.FC<EditorProps> = ({
                                 <div>
                                     <h3 className="font-bold text-slate-800 mb-1">快速模式 (Fast)</h3>
                                     <p className="text-xs text-slate-500 leading-relaxed">
-                                        使用默认设置直接翻译未锁定的空句段。速度最快，适合常规文档。
+                                        按所选策略（TM / MT / LLM）填充未锁定的空句段。
                                     </p>
                                 </div>
                             </button>
@@ -6512,6 +7260,12 @@ export const Editor: React.FC<EditorProps> = ({
                             <p className="text-slate-500 mb-6">
                                 共处理 {batchProgress.total} 个句段。<br/>
                                 成功: {batchStats.succeeded} | 失败: {batchStats.failed}
+                                {batchSourceStats && (
+                                  <>
+                                    <br />
+                                    TM: {batchSourceStats.tm} · 模糊: {batchSourceStats.fuzzy} · MT: {batchSourceStats.mt} · LLM: {batchSourceStats.llm}
+                                  </>
+                                )}
                             </p>
                             <button 
                                 onClick={handleBatchModalClose}
@@ -6520,6 +7274,70 @@ export const Editor: React.FC<EditorProps> = ({
                                 关闭
                             </button>
                         </div>
+                    )}
+                </div>
+            </div>,
+            document.body
+        )}
+
+        <QuickMtPopup
+            open={quickMtOpen}
+            sourceText={quickMtSource}
+            sourceLang={project.sourceLang}
+            targetLang={project.targetLang}
+            mtSettings={mtReferenceSettings}
+            onClose={() => setQuickMtOpen(false)}
+            onInsert={(text) => {
+                if (activeSegmentId) {
+                    const cur = activeSegment?.targetText || '';
+                    handleSegmentChange(activeSegmentId, cur ? `${cur} ${text}` : text);
+                }
+            }}
+        />
+
+        {isProofreadModalOpen && createPortal(
+            <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-[100] flex items-center justify-center p-4">
+                <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6">
+                    <h2 className="text-lg font-bold text-slate-900 mb-4 flex items-center gap-2">
+                        <Icons.ClipboardCheck className="w-5 h-5 text-purple-600" />
+                        批量 AI 校对
+                    </h2>
+                    {isProofreadRunning ? (
+                        <>
+                            <p className="text-sm text-slate-600 mb-3">
+                                进度 {proofreadProgress.current} / {proofreadProgress.total}
+                            </p>
+                            <div className="w-full bg-slate-100 h-3 rounded-full overflow-hidden mb-4">
+                                <div
+                                    className="h-full bg-purple-500 transition-all"
+                                    style={{
+                                        width: `${proofreadProgress.total ? (proofreadProgress.current / proofreadProgress.total) * 100 : 0}%`,
+                                    }}
+                                />
+                            </div>
+                            <button
+                                type="button"
+                                onClick={() => { proofreadCancelRef.current += 1; setIsProofreadRunning(false); setIsProofreadModalOpen(false); }}
+                                className="w-full py-2 text-sm border border-slate-200 rounded-lg hover:bg-slate-50"
+                            >
+                                取消
+                            </button>
+                        </>
+                    ) : (
+                        <>
+                            {proofreadStats && (
+                                <p className="text-sm text-slate-600 mb-4">
+                                    已校对 {proofreadStats.processed} 句；发现问题 {proofreadStats.withIssues} 句；失败 {proofreadStats.failed} 句。
+                                </p>
+                            )}
+                            <button
+                                type="button"
+                                onClick={() => setIsProofreadModalOpen(false)}
+                                className="w-full py-2 bg-slate-900 text-white rounded-lg font-medium"
+                            >
+                                关闭
+                            </button>
+                        </>
                     )}
                 </div>
             </div>,

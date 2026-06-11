@@ -28,6 +28,8 @@ export interface TagValidationResult {
   message?: string;
 }
 
+export const TAG_FORMAT_QA_MESSAGE = '请注意：译文格式与原文格式不一致';
+
 export function validateSdlMarkers(source: string, target: string): TagValidationResult {
   const src = countTags(source);
   const tgt = countTags(target);
@@ -38,22 +40,13 @@ export function validateSdlMarkers(source: string, target: string): TagValidatio
     const sc = src.close.get(id) ?? 0;
     const to = tgt.open.get(id) ?? 0;
     const tc = tgt.close.get(id) ?? 0;
-    if (so !== sc) {
-      return { ok: false, message: `原文标签 <${id}> 未配对` };
-    }
-    if (to !== tc) {
-      return { ok: false, message: `译文标签 <${id}> 未配对` };
-    }
-    if (so !== to) {
-      return { ok: false, message: `标签 <${id}> 数量与原文不一致（原文 ${so}，译文 ${to}）` };
+    if (so !== sc || to !== tc || so !== to) {
+      return { ok: false, message: TAG_FORMAT_QA_MESSAGE };
     }
   }
 
   if (src.standalone !== tgt.standalone) {
-    return {
-      ok: false,
-      message: `独立标签数量与原文不一致（原文 ${src.standalone}，译文 ${tgt.standalone}）`,
-    };
+    return { ok: false, message: TAG_FORMAT_QA_MESSAGE };
   }
 
   return { ok: true };
