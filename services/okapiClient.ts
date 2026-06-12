@@ -85,12 +85,17 @@ function arrayBufferToBase64(buf: ArrayBuffer): string {
   return btoa(binary);
 }
 
+export type OkapiMergeOptions = {
+  exportFont?: MonolingualExportFont;
+  pptxFontScale?: number;
+};
+
 async function mergeViaServer(
   fileName: string,
   originalBytes: ArrayBuffer,
   segments: OkapiMergeSegment[],
   settings?: OkapiSettings,
-  exportFont?: MonolingualExportFont
+  options?: OkapiMergeOptions
 ): Promise<{ fileName: string; bytes: Uint8Array; mime: string } | null> {
   const base = getApiBaseUrl();
   const res = await fetch(`${base}/api/okapi/merge`, {
@@ -101,7 +106,8 @@ async function mergeViaServer(
       fileBase64: arrayBufferToBase64(originalBytes),
       segments: buildMergePayload(segments),
       serviceUrl: settings?.serviceUrl,
-      exportFont: exportFont ?? 'simsun',
+      exportFont: options?.exportFont ?? 'simsun',
+      pptxFontScale: options?.pptxFontScale,
     }),
     signal: AbortSignal.timeout(300_000),
   });
@@ -130,13 +136,16 @@ async function mergeViaSidecarDirect(
   originalBytes: ArrayBuffer,
   segments: OkapiMergeSegment[],
   settings?: OkapiSettings,
-  exportFont?: MonolingualExportFont
+  options?: OkapiMergeOptions
 ): Promise<{ fileName: string; bytes: Uint8Array; mime: string }> {
   const root = resolveOkapiServiceUrl(settings);
   const form = new FormData();
   form.append('file', new Blob([originalBytes]), fileName);
   form.append('segments_json', JSON.stringify(buildMergePayload(segments)));
-  form.append('export_font', exportFont ?? 'simsun');
+  form.append('export_font', options?.exportFont ?? 'simsun');
+  if (options?.pptxFontScale != null) {
+    form.append('pptx_font_scale', String(options.pptxFontScale));
+  }
 
   const res = await fetch(`${root}/merge`, {
     method: 'POST',
@@ -224,10 +233,10 @@ export async function okapiMergeFile(
   originalBytes: ArrayBuffer,
   segments: OkapiMergeSegment[],
   settings?: OkapiSettings,
-  exportFont?: MonolingualExportFont
+  options?: OkapiMergeOptions
 ): Promise<{ fileName: string; bytes: Uint8Array; mime: string }> {
   try {
-    const viaServer = await mergeViaServer(fileName, originalBytes, segments, settings, exportFont);
+    const viaServer = await mergeViaServer(fileName, originalBytes, segments, settings, options);
     if (viaServer) return viaServer;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -235,7 +244,7 @@ export async function okapiMergeFile(
   }
 
   try {
-    return await mergeViaSidecarDirect(fileName, originalBytes, segments, settings, exportFont);
+    return await mergeViaSidecarDirect(fileName, originalBytes, segments, settings, options);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (/failed to fetch|network|abort/i.test(msg)) {
@@ -252,6 +261,7 @@ export const OKAPI_SUPPORTED_EXTENSIONS = [
   '.html',
   '.htm',
   '.idml',
+  '.pptx',
   '.xlf',
   '.xliff',
   '.mqxliff',

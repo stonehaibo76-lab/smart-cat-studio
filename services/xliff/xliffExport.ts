@@ -2,6 +2,7 @@ import type { Project, ProjectFile, Segment } from '../../types';
 import { exportSdlxliffBytes, type SdlExportSegment } from './sdlxliffExporter';
 import { applyMqTranslations, mqxliffToBytes } from './mqxliffHandler';
 import { buildSdlrpxPackage } from './tradosPackageHandler';
+import { buildMqxlzPackage } from './memoqPackageHandler';
 import { loadXliffBlob, bytesToUtf8, detectBom } from './xliffBlobStore';
 import { inferFileInterchangeFormat } from './projectXliffDetect';
 import { segmentStatusToSdlSlug } from '../../utils/segmentStatusUi';
@@ -68,6 +69,32 @@ export async function exportSdlrpxPackage(project: Project): Promise<{ bytes: Ui
   const bytes = await buildSdlrpxPackage(packageBytes, pkg, updates);
   const stem = pkg.projectName.replace(/[^\w.\-]+/g, '_') || 'package';
   return { bytes, fileName: `${stem}_translated.sdlrpx` };
+}
+
+export async function exportMqxlzPackage(project: Project): Promise<{ bytes: Uint8Array; fileName: string }> {
+  const pkg = project.memoqPackage;
+  if (!pkg) throw new Error('当前项目不是 memoQ 包项目');
+
+  const packageBytes = await loadXliffBlob(pkg.packageBlobId);
+  if (!packageBytes) throw new Error('无法加载原始 MQXLZ 包');
+
+  const updates = new Map<string, { originalBytes: ArrayBuffer; translations: string[] }>();
+
+  for (const file of project.files) {
+    const path = file.interchangeMeta?.packagePath;
+    const blobId = file.interchangeMeta?.originalBlobId;
+    if (!path || !blobId) continue;
+    const original = await loadXliffBlob(blobId);
+    if (!original) continue;
+    updates.set(path, {
+      originalBytes: original,
+      translations: file.segments.map((s) => s.targetText),
+    });
+  }
+
+  const bytes = await buildMqxlzPackage(packageBytes, pkg, updates);
+  const stem = pkg.originalFileName.replace(/\.mqxlz$/i, '').replace(/[^\w.\-]+/g, '_') || 'package';
+  return { bytes, fileName: `${stem}_translated.mqxlz` };
 }
 
 export function downloadBytes(bytes: Uint8Array, fileName: string, mime = 'application/xml'): void {

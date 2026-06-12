@@ -1,31 +1,85 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect, useMemo, useLayoutEffect, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { Icons } from '../components/ui/Icons';
+import { ProjectCreateWizard } from '../components/project-wizard/ProjectCreateWizard';
 import { Project, SegmentStatus, MatchType, TermBase, TranslationMemory, ProjectFile, Segment, DuplicateAnalysisResult, GrammarRuleBook, RegexDictionaryBook } from '../types';
 import { SUPPORTED_LANGUAGES } from '../constants';
-import { shouldAutoLockSegmentAtImport } from '../services/segmentAutoLock';
-import { toDatetimeLocalValue } from '../services/projectDueDate';
-import * as XLSX from 'xlsx';
-import { parseDocxForImport } from '../services/catInterop/bilingualDocxHandler';
-import { newSourceBlobId, saveSourceBlob } from '../services/catInterop/sourceBlobStore';
-import { okapiExtractFile, isOkapiCandidateFile } from '../services/okapiClient';
+import { toDatetimeLocalValue, getProjectDeliveryDueRaw, parseDeliveryDeadline } from '../services/projectDueDate';
+import { parseProjectFile } from '../services/projectCreateService';
 import { countBillableChars, normalizeForMatching } from '../utils/textNormalize';
-import {
-  parseXliffFile,
-  parseTradosPackage,
-  detectXliffKind,
-  buildProjectFileFromParsed,
-  type ParsedXliffProject,
-} from '../services/xliff/xliffImport';
+import type { ParsedXliffProject } from '../services/xliff/xliffImport';
 
-type UploadedFilePayload = {
-  name: string;
-  content: string;
-  isExcel?: boolean;
-  segments?: Array<{ source: string; target: string; okapiTuId?: string; inlineRunMeta?: import('../types').InlineRunStyle[] }>;
-  sourceBlobId?: string;
-  isXliff?: boolean;
-  xliffProject?: ParsedXliffProject;
+type SearchField = 'name';
+type DateField = 'created' | 'delivery';
+type SettingsTab = 'info' | 'terminology' | 'memory' | 'dictionaries';
+
+const LANG_ZH: Record<string, string> = {
+  'en-US': '英语',
+  'zh-CN': '简体中文',
+  'ja-JP': '日语',
+  'ko-KR': '韩语',
+  'fr-FR': '法语',
+  'es-ES': '西班牙语',
+  'de-DE': '德语',
+  'ru-RU': '俄语',
+  'it-IT': '意大利语',
+  'pt-BR': '葡萄牙语',
+  'vi-VN': '越南语',
+  'th-TH': '泰语',
+  'ms-MY': '马来语',
+  'my-MM': '缅甸语',
+  'lo-LA': '老挝语',
 };
+
+function langLabel(code: string): string {
+  return LANG_ZH[code] ?? SUPPORTED_LANGUAGES.find((l) => l.code === code)?.name ?? code;
+}
+
+function countProjectChars(project: Project): number {
+  return project.files.reduce(
+    (acc, f) => acc + f.segments.reduce((s, seg) => s + countBillableChars(seg.sourceText), 0),
+    0
+  );
+}
+
+function parseProjectCreatedAt(createdAt: string): Date | null {
+  const d = new Date(createdAt);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+function formatTableDateLines(raw: string | undefined): { date: string; time: string } {
+  if (!raw) return { date: '--', time: '' };
+  const d = raw.includes('T') ? parseDeliveryDeadline(raw) : parseProjectCreatedAt(raw);
+  if (!d) return { date: raw.slice(0, 10), time: '' };
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return { date: `${y}-${m}-${day}`, time: `${hh}:${mm}` };
+}
+
+function projectTypeLabel(project: Project): string {
+  if (project.tradosPackage) return 'Trados';
+  return '人工翻译';
+}
+
+const PROJECT_MENU_WIDTH = 176;
+const PROJECT_MENU_GAP = 4;
+
+function computeProjectMenuPosition(
+  anchorRect: DOMRect,
+  menuHeight: number
+): { top: number; left: number } {
+  const spaceBelow = window.innerHeight - anchorRect.bottom;
+  const openUp = spaceBelow < menuHeight + PROJECT_MENU_GAP && anchorRect.top > menuHeight + PROJECT_MENU_GAP;
+  const top = openUp
+    ? anchorRect.top - menuHeight - PROJECT_MENU_GAP
+    : anchorRect.bottom + PROJECT_MENU_GAP;
+  let left = anchorRect.right - PROJECT_MENU_WIDTH;
+  left = Math.max(8, Math.min(left, window.innerWidth - PROJECT_MENU_WIDTH - 8));
+  return { top, left };
+}
 
 interface DashboardProps {
   projects: Project[];
@@ -42,145 +96,197 @@ interface DashboardProps {
     isExcel?: boolean,
     excelSegments?: Array<{ source: string; target?: string; okapiTuId?: string; inlineRunMeta?: import('../types').InlineRunStyle[] }>,
     xliffProject?: ParsedXliffProject,
-    sourceBlobId?: string
+    sourceBlobId?: string,
+    docxImportMode?: 'bilingual' | 'monolingual',
+    docxBilingualLayout?: 'table' | 'interleaved'
   ) => void;
   onDeleteFileFromProject: (projectId: string, fileId: string) => void;
   onDeleteProject: (id: string) => void;
   onUpdateProject: (project: Project) => void;
   searchQuery: string;
   onTradosQuickExport?: (projectId: string, kind: 'sdlxliff' | 'sdlrpx') => void;
+  onMemoqQuickExport?: (projectId: string, kind: 'mqxliff' | 'mqxlz') => void;
 }
 
-const ProjectCard: React.FC<{
+const ProjectTableRow: React.FC<{
   project: Project;
-  tmNames: string[];
-  tbNames: string[];
-  grNames: string[];
-  rxNames: string[];
-  onClick: () => void;
+  mainTbName?: string;
+  onOpen: () => void;
   onDelete: () => void;
   onManageFiles: () => void;
   onSettings: () => void;
   onAnalyzeDuplicates: () => void;
   onExportSdlxliff?: () => void;
   onExportSdlrpx?: () => void;
-}> = ({ project, tmNames, tbNames, grNames, rxNames, onClick, onDelete, onManageFiles, onSettings, onAnalyzeDuplicates, onExportSdlxliff, onExportSdlrpx }) => {
+  onExportMqxliff?: () => void;
+  onExportMqxlz?: () => void;
+  menuOpen: boolean;
+  onMenuToggle: () => void;
+  onMenuClose: () => void;
+}> = ({
+  project,
+  mainTbName,
+  onOpen,
+  onDelete,
+  onManageFiles,
+  onSettings,
+  onAnalyzeDuplicates,
+  onExportSdlxliff,
+  onExportSdlrpx,
+  onExportMqxliff,
+  onExportMqxlz,
+  menuOpen,
+  onMenuToggle,
+  onMenuClose,
+}) => {
+  const menuAnchorRef = useRef<HTMLButtonElement>(null);
+  const menuPanelRef = useRef<HTMLDivElement>(null);
+  const [menuPosition, setMenuPosition] = useState<{ top: number; left: number } | null>(null);
+
+  const updateMenuPosition = useCallback(() => {
+    const anchor = menuAnchorRef.current;
+    const panel = menuPanelRef.current;
+    if (!anchor || !panel) return;
+    setMenuPosition(computeProjectMenuPosition(anchor.getBoundingClientRect(), panel.offsetHeight));
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!menuOpen) {
+      setMenuPosition(null);
+      return;
+    }
+    updateMenuPosition();
+  }, [menuOpen, updateMenuPosition, onExportSdlxliff, onExportSdlrpx, onExportMqxliff, onExportMqxlz]);
+
+  useEffect(() => {
+    if (!menuOpen) return;
+    const closeOnScrollOrResize = () => onMenuClose();
+    window.addEventListener('scroll', closeOnScrollOrResize, true);
+    window.addEventListener('resize', closeOnScrollOrResize);
+    return () => {
+      window.removeEventListener('scroll', closeOnScrollOrResize, true);
+      window.removeEventListener('resize', closeOnScrollOrResize);
+    };
+  }, [menuOpen, onMenuClose]);
+
+  const created = formatTableDateLines(project.createdAt);
+  const deliveryRaw = getProjectDeliveryDueRaw(project);
+  const delivery = formatTableDateLines(deliveryRaw);
+  const wordCount = countProjectChars(project);
+  const progress = project.progress ?? 0;
+  const isComplete = progress >= 100 || project.isCompleted;
+
+  const menuPortal =
+    menuOpen &&
+    typeof document !== 'undefined' &&
+    createPortal(
+      <>
+        <button
+          type="button"
+          aria-label="关闭菜单"
+          className="fixed inset-0 z-[60] cursor-default"
+          onClick={onMenuClose}
+        />
+        <div
+          ref={menuPanelRef}
+          style={
+            menuPosition
+              ? { top: menuPosition.top, left: menuPosition.left, width: PROJECT_MENU_WIDTH }
+              : { top: -9999, left: -9999, width: PROJECT_MENU_WIDTH, visibility: 'hidden' as const }
+          }
+          className="fixed z-[70] rounded-lg border border-slate-200 bg-white py-1 shadow-lg text-left"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button type="button" onClick={() => { onMenuClose(); onOpen(); }} className="w-full px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 text-left">打开项目</button>
+          <button type="button" onClick={() => { onMenuClose(); onManageFiles(); }} className="w-full px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 text-left">管理文件</button>
+          <button type="button" onClick={() => { onMenuClose(); onSettings(); }} className="w-full px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 text-left">项目设置</button>
+          <button type="button" onClick={() => { onMenuClose(); onAnalyzeDuplicates(); }} className="w-full px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 text-left">重复率分析</button>
+          {onExportSdlxliff && (
+            <button type="button" onClick={() => { onMenuClose(); onExportSdlxliff(); }} className="w-full px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 text-left">导出 SDLXLIFF</button>
+          )}
+          {onExportSdlrpx && (
+            <button type="button" onClick={() => { onMenuClose(); onExportSdlrpx(); }} className="w-full px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 text-left">导出 SDLRPX</button>
+          )}
+          {onExportMqxliff && (
+            <button type="button" onClick={() => { onMenuClose(); onExportMqxliff(); }} className="w-full px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 text-left">导出 MQXLIFF</button>
+          )}
+          {onExportMqxlz && (
+            <button type="button" onClick={() => { onMenuClose(); onExportMqxlz(); }} className="w-full px-3 py-2 text-sm text-slate-700 hover:bg-slate-50 text-left">导出 MQXLZ</button>
+          )}
+          <div className="my-1 border-t border-slate-100" />
+          <button type="button" onClick={() => { onMenuClose(); onDelete(); }} className="w-full px-3 py-2 text-sm text-red-600 hover:bg-red-50 text-left">删除项目</button>
+        </div>
+      </>,
+      document.body
+    );
+
   return (
-    <div 
-      onClick={onClick}
-      className="bg-white rounded-2xl p-6 shadow-sm border border-slate-200 hover:shadow-xl hover:border-blue-200 transition-all cursor-pointer group relative overflow-hidden"
+    <tr
+      className="border-b border-slate-100 hover:bg-slate-50/80 transition-colors cursor-pointer group"
+      onClick={onOpen}
     >
-      <div className="absolute top-0 right-0 p-4 opacity-0 group-hover:opacity-100 transition-opacity flex gap-2 z-10">
-         <button 
-            onClick={(e) => { e.stopPropagation(); onManageFiles(); }}
-            className="p-2 bg-slate-100 hover:bg-blue-50 text-slate-500 hover:text-blue-600 rounded-lg transition-colors"
-            title="管理文件"
-         >
-             <Icons.File className="w-4 h-4" />
-         </button>
-         <button 
-            onClick={(e) => { e.stopPropagation(); onSettings(); }}
-            className="p-2 bg-slate-100 hover:bg-blue-50 text-slate-500 hover:text-blue-600 rounded-lg transition-colors"
-            title="项目设置"
-         >
-             <Icons.Settings className="w-4 h-4" />
-         </button>
-         <button 
-            onClick={(e) => { e.stopPropagation(); onAnalyzeDuplicates(); }}
-            className="p-2 bg-slate-100 hover:bg-purple-50 text-slate-500 hover:text-purple-600 rounded-lg transition-colors"
-            title="重复率分析"
-         >
-             <Icons.Copy className="w-4 h-4" />
-         </button>
-         {onExportSdlxliff && (
-         <button
-            onClick={(e) => { e.stopPropagation(); onExportSdlxliff(); }}
-            className="p-2 bg-slate-100 hover:bg-emerald-50 text-slate-500 hover:text-emerald-600 rounded-lg transition-colors"
-            title="导出 SDLXLIFF"
-         >
-             <Icons.Download className="w-4 h-4" />
-         </button>
-         )}
-         {onExportSdlrpx && (
-         <button
-            onClick={(e) => { e.stopPropagation(); onExportSdlrpx(); }}
-            className="p-2 bg-slate-100 hover:bg-amber-50 text-slate-500 hover:text-amber-600 rounded-lg transition-colors"
-            title="导出 Trados 回传包 (SDLRPX)"
-         >
-             <Icons.Upload className="w-4 h-4" />
-         </button>
-         )}
-         <button 
-            onClick={(e) => { e.stopPropagation(); onDelete(); }}
-            className="p-2 bg-slate-100 hover:bg-red-50 text-slate-500 hover:text-red-500 rounded-lg transition-colors"
-            title="删除项目"
-         >
-             <Icons.Trash className="w-4 h-4" />
-         </button>
-      </div>
-
-      <div className="mb-4">
-        <div className="flex justify-between items-start mb-2">
-           <div className="p-3 bg-blue-50 text-blue-600 rounded-xl mb-2 group-hover:scale-110 transition-transform origin-top-left">
-             <Icons.File className="w-6 h-6" />
-           </div>
+      <td className="px-4 py-3.5 align-middle">
+        <div className="font-medium text-slate-900 group-hover:text-blue-600 transition-colors truncate max-w-[220px]">
+          {project.name}
         </div>
-        <h3 className="font-bold text-lg text-slate-900 line-clamp-1 mb-1 group-hover:text-blue-600 transition-colors">{project.name}</h3>
-        <div className="flex items-center gap-2 text-xs font-medium text-slate-500">
-           <span className="bg-slate-100 px-2 py-0.5 rounded text-slate-600 uppercase tracking-wider">{project.sourceLang}</span>
-           <Icons.ChevronRight className="w-3 h-3 text-slate-300" />
-           <span className="bg-slate-100 px-2 py-0.5 rounded text-slate-600 uppercase tracking-wider">{project.targetLang}</span>
+        <div className="mt-1 flex items-center gap-2 text-xs">
+          <span className="inline-flex items-center rounded border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-blue-600">
+            {projectTypeLabel(project)}
+          </span>
+          <span className="text-slate-400">{wordCount.toLocaleString()} 字</span>
         </div>
-      </div>
-      
-      <div className="space-y-3">
-        <div>
-            <div className="flex justify-between text-xs mb-1.5">
-                <span className="font-medium text-slate-500">进度 ({project.progress}%)</span>
-                <span className="text-slate-400">{project.totalSegments} 句段</span>
-            </div>
-            <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden">
-                <div 
-                    className="bg-blue-500 h-full rounded-full transition-all duration-500 ease-out group-hover:bg-blue-600" 
-                    style={{ width: `${project.progress}%` }}
-                />
-            </div>
+      </td>
+      <td className="px-4 py-3.5 align-middle text-sm text-slate-600 whitespace-nowrap">
+        {mainTbName || '--'}
+      </td>
+      <td className="px-4 py-3.5 align-middle text-sm text-slate-500 whitespace-nowrap">--</td>
+      <td className="px-4 py-3.5 align-middle text-sm text-slate-700 whitespace-nowrap">
+        {langLabel(project.sourceLang)} → {langLabel(project.targetLang)}
+      </td>
+      <td className="px-4 py-3.5 align-middle text-xs text-slate-500 whitespace-nowrap">
+        <div>{created.date}</div>
+        {created.time && <div className="text-slate-400">{created.time}</div>}
+      </td>
+      <td className="px-4 py-3.5 align-middle text-xs text-slate-500 whitespace-nowrap">
+        {deliveryRaw ? (
+          <>
+            <div>{delivery.date}</div>
+            {delivery.time && <div className="text-slate-400">{delivery.time}</div>}
+          </>
+        ) : (
+          '--'
+        )}
+      </td>
+      <td className="px-4 py-3.5 align-middle min-w-[120px]">
+        <div className="flex items-center gap-2">
+          <div className="flex-1 h-1.5 bg-slate-100 rounded-full overflow-hidden min-w-[72px]">
+            <div
+              className={`h-full rounded-full transition-all ${
+                isComplete ? 'bg-emerald-500' : progress > 0 ? 'bg-blue-500' : 'bg-slate-200'
+              }`}
+              style={{ width: `${Math.min(100, Math.max(0, progress))}%` }}
+            />
+          </div>
+          <span className={`text-xs font-medium tabular-nums shrink-0 ${isComplete ? 'text-emerald-600' : 'text-slate-500'}`}>
+            {progress}%
+          </span>
         </div>
-
-        <div className="pt-4 border-t border-slate-100 grid grid-cols-2 gap-2 text-[10px] text-slate-500">
-             <div className="flex flex-col gap-0.5" title={tmNames.join(', ')}>
-                <div className="flex items-center gap-1.5">
-                    <Icons.Database className={`w-3 h-3 ${tmNames.length > 0 ? 'text-blue-500' : 'text-slate-300'}`} />
-                    <span className="font-bold text-slate-600">记忆库 ({tmNames.length})</span>
-                </div>
-                <span className="truncate pl-4.5 text-slate-400">{tmNames[0] || '无'} {tmNames.length > 1 ? `+${tmNames.length - 1}` : ''}</span>
-             </div>
-             <div className="flex flex-col gap-0.5" title={tbNames.join(', ')}>
-                <div className="flex items-center gap-1.5">
-                    <Icons.TermBase className={`w-3 h-3 ${tbNames.length > 0 ? 'text-red-500' : 'text-slate-300'}`} />
-                    <span className="font-bold text-slate-600">术语库 ({tbNames.length})</span>
-                </div>
-                <span className="truncate pl-4.5 text-slate-400">{tbNames[0] || '无'} {tbNames.length > 1 ? `+${tbNames.length - 1}` : ''}</span>
-             </div>
-             <div className="col-span-2 grid grid-cols-2 gap-2 border-t border-slate-100 pt-2 mt-1">
-                <div className="flex flex-col gap-0.5 min-w-0" title={grNames.join(', ')}>
-                    <div className="flex items-center gap-1.5 min-w-0">
-                        <Icons.Concordance className={`w-3 h-3 shrink-0 ${grNames.length > 0 ? 'text-amber-600' : 'text-slate-300'}`} />
-                        <span className="font-bold text-slate-600">规则词典 ({grNames.length})</span>
-                    </div>
-                    <span className="truncate pl-4.5 text-slate-400">{grNames[0] || '无'} {grNames.length > 1 ? `+${grNames.length - 1}` : ''}</span>
-                </div>
-                <div className="flex flex-col gap-0.5 min-w-0" title={rxNames.join(', ')}>
-                    <div className="flex items-center gap-1.5 min-w-0">
-                        <Icons.RegexDict className={`w-3 h-3 shrink-0 ${rxNames.length > 0 ? 'text-violet-600' : 'text-slate-300'}`} />
-                        <span className="font-bold text-slate-600">正则词典 ({rxNames.length})</span>
-                    </div>
-                    <span className="truncate pl-4.5 text-slate-400">{rxNames[0] || '无'} {rxNames.length > 1 ? `+${rxNames.length - 1}` : ''}</span>
-                </div>
-             </div>
-        </div>
-      </div>
-    </div>
+      </td>
+      <td className="px-4 py-3.5 align-middle text-sm text-slate-500 whitespace-nowrap">--</td>
+      <td className="px-4 py-3.5 align-middle text-right" onClick={(e) => e.stopPropagation()}>
+        <button
+          ref={menuAnchorRef}
+          type="button"
+          onClick={onMenuToggle}
+          className="inline-flex items-center justify-center w-8 h-8 rounded text-blue-600 hover:bg-blue-50 transition-colors"
+          aria-label="操作菜单"
+          aria-expanded={menuOpen}
+        >
+          <Icons.More className="w-4 h-4" />
+        </button>
+        {menuPortal}
+      </td>
+    </tr>
   );
 };
 
@@ -188,6 +294,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
     projects, availableTMs, availableTBs, availableGrammarRuleBooks, availableRegexDictionaryBooks,
     onOpenProject, onCreateProject, onAddFileToProject, onDeleteFileFromProject, onDeleteProject, onUpdateProject, searchQuery,
     onTradosQuickExport,
+    onMemoqQuickExport,
 }) => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
@@ -215,29 +322,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const [settingsDeliveryDueAt, setSettingsDeliveryDueAt] = useState('');
   const [settingsProjectCompleted, setSettingsProjectCompleted] = useState(false);
   const [settingsDeliveryReminderEnabled, setSettingsDeliveryReminderEnabled] = useState(true);
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>('info');
 
-  // Form State
-  const [newProjectName, setNewProjectName] = useState('');
-  const [sourceLang, setSourceLang] = useState('en-US');
-  const [targetLang, setTargetLang] = useState('zh-CN');
-  
-  // File State
-  const [uploadedFiles, setUploadedFiles] = useState<UploadedFilePayload[]>([]);
   const [isParsing, setIsParsing] = useState(false);
-
-  // Resource Association State (Multi Select)
-  const [mainTmId, setMainTmId] = useState<string>(''); 
-  const [referenceTmIds, setReferenceTmIds] = useState<Set<string>>(new Set());
-
-  const [mainTbId, setMainTbId] = useState<string>(''); 
-  const [referenceTbIds, setReferenceTbIds] = useState<Set<string>>(new Set());
-
-  const [grammarRuleBookIds, setGrammarRuleBookIds] = useState<Set<string>>(new Set());
-  const [regexDictionaryBookIds, setRegexDictionaryBookIds] = useState<Set<string>>(new Set());
-  
-  // "Create New Resource" State
-  const [newTmName, setNewTmName] = useState('');
-  const [newTbName, setNewTbName] = useState('');
 
   // File Split State
   const [isSplitModalOpen, setIsSplitModalOpen] = useState(false);
@@ -252,27 +339,67 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const [duplicateResult, setDuplicateResult] = useState<DuplicateAnalysisResult | null>(null);
   const [isAnalyzingDuplicates, setIsAnalyzingDuplicates] = useState(false);
 
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const [searchField, setSearchField] = useState<SearchField>('name');
+  const [localSearchInput, setLocalSearchInput] = useState('');
+  const [appliedSearch, setAppliedSearch] = useState('');
+  const [dateField, setDateField] = useState<DateField>('created');
+  const [dateStart, setDateStart] = useState('');
+  const [dateEnd, setDateEnd] = useState('');
+  const [appliedDateField, setAppliedDateField] = useState<DateField>('created');
+  const [appliedDateStart, setAppliedDateStart] = useState('');
+  const [appliedDateEnd, setAppliedDateEnd] = useState('');
+
   const addFileInputRef = useRef<HTMLInputElement>(null);
 
-  const filteredProjects = projects.filter(p => 
-      p.name.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const combinedSearch = appliedSearch || searchQuery;
+
+  const filteredProjects = useMemo(() => {
+    return projects.filter((p) => {
+      if (combinedSearch && searchField === 'name') {
+        if (!p.name.toLowerCase().includes(combinedSearch.toLowerCase())) return false;
+      }
+      if (appliedDateStart || appliedDateEnd) {
+        const raw =
+          appliedDateField === 'delivery'
+            ? getProjectDeliveryDueRaw(p)
+            : p.createdAt;
+        if (!raw) return false;
+        const d = appliedDateField === 'delivery' ? parseDeliveryDeadline(raw) : parseProjectCreatedAt(raw);
+        if (!d) return false;
+        const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        if (appliedDateStart && day < appliedDateStart) return false;
+        if (appliedDateEnd && day > appliedDateEnd) return false;
+      }
+      return true;
+    });
+  }, [projects, combinedSearch, searchField, appliedDateStart, appliedDateEnd, appliedDateField]);
+
+  useEffect(() => {
+    setOpenMenuId(null);
+  }, [filteredProjects.length]);
+
+  const handleApplyFilters = () => {
+    setAppliedSearch(localSearchInput.trim());
+    setAppliedDateField(dateField);
+    setAppliedDateStart(dateStart);
+    setAppliedDateEnd(dateEnd);
+  };
+
+  const handleResetFilters = () => {
+    setLocalSearchInput('');
+    setAppliedSearch('');
+    setDateField('created');
+    setDateStart('');
+    setDateEnd('');
+    setAppliedDateField('created');
+    setAppliedDateStart('');
+    setAppliedDateEnd('');
+  };
 
   const handleOpenCreateModal = () => {
-      // Default to the first available or empty
-      setMainTmId(availableTMs.length > 0 ? availableTMs[0].id : 'create-new');
-      setReferenceTmIds(new Set());
-      
-      setMainTbId(availableTBs.length > 0 ? availableTBs[0].id : 'create-new');
-      setReferenceTbIds(new Set());
-      setGrammarRuleBookIds(new Set());
-      setRegexDictionaryBookIds(new Set());
-
-      setNewProjectName('');
-      setUploadedFiles([]);
       setIsModalOpen(true);
-  }
+  };
   
   const handleOpenFilesModal = (projectId: string) => {
       setTargetProjectId(projectId);
@@ -306,163 +433,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
           setSettingsProjectCompleted(project.isCompleted === true);
           setSettingsDeliveryReminderEnabled(project.deliveryDueReminderEnabled !== false);
 
+          setSettingsTab('info');
           setIsSettingsModalOpen(true);
       }
-  };
-
-  const parseFile = async (file: File): Promise<UploadedFilePayload> => {
-       const xliffKind = detectXliffKind(file.name);
-       if (xliffKind === 'package') {
-          const xliffProject = await parseTradosPackage(file);
-          return {
-            name: file.name,
-            content: '',
-            isXliff: true,
-            xliffProject,
-          };
-       }
-       if (xliffKind === 'sdlxliff' || xliffKind === 'mqxliff') {
-          const xliffProject = await parseXliffFile(file);
-          return {
-            name: file.name,
-            content: '',
-            isXliff: true,
-            xliffProject,
-          };
-       }
-       if (file.name.endsWith('.docx')) {
-          const arrayBuffer = await file.arrayBuffer();
-          const sourceBlobId = newSourceBlobId();
-          await saveSourceBlob(sourceBlobId, arrayBuffer);
-          const { segments: docxSegments } = await parseDocxForImport(arrayBuffer, file.name);
-          if (docxSegments.length > 0) {
-            return {
-              name: file.name,
-              content: docxSegments.map((s) => s.source).join('\n'),
-              isExcel: true,
-              sourceBlobId,
-              segments: docxSegments.map((s) => ({
-                source: s.source,
-                target: s.target,
-                okapiTuId: s.okapiTuId,
-                inlineRunMeta: s.inlineRunMeta,
-              })),
-            };
-          }
-          return { name: file.name, content: '', sourceBlobId };
-       }
-       if (isOkapiCandidateFile(file.name) && !file.name.endsWith('.docx')) {
-          const arrayBuffer = await file.arrayBuffer();
-          const sourceBlobId = newSourceBlobId();
-          await saveSourceBlob(sourceBlobId, arrayBuffer);
-          const extracted = await okapiExtractFile(file);
-          if (extracted.ok && extracted.segments?.length) {
-            return {
-              name: file.name,
-              content: extracted.segments.map((s) => s.source).join('\n'),
-              isExcel: true,
-              sourceBlobId,
-              segments: extracted.segments.map((s) => ({
-                source: s.source,
-                target: s.target || '',
-                okapiTuId: s.okapiTuId ?? s.id,
-                inlineRunMeta: s.inlineRunMeta,
-              })),
-            };
-          }
-       } else if (file.name.endsWith('.xlsx') || file.name.endsWith('.xls')) {
-          // 解析Excel文件
-          const arrayBuffer = await file.arrayBuffer();
-          const workbook = XLSX.read(arrayBuffer, { type: 'array' });
-          const firstSheetName = workbook.SheetNames[0];
-          const worksheet = workbook.Sheets[firstSheetName];
-
-          // 获取原始数据
-          const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as any[][];
-
-          // 检测是否是双语对照表（有两列及以上）
-          const hasMultipleColumns = jsonData.length > 0 && jsonData[0] && jsonData[0].length >= 2;
-
-          if (hasMultipleColumns) {
-              // 双语对照表：提取原文和译文
-              const segments = jsonData.map((row) => {
-                  if (!row || row.length < 1) return null;
-
-                  // 跳过可能的标题行
-                  const firstCell = String(row[0] || '').trim().toLowerCase();
-                  if (firstCell === 'source' || firstCell === '原文') {
-                      const secondCell = String(row[1] || '').trim().toLowerCase();
-                      if (secondCell === 'target' || secondCell === '译文') {
-                          return null;
-                      }
-                  }
-
-                  const source = String(row[0] || '').trim();
-                  const target = row[1] ? String(row[1] || '').trim() : '';
-
-                  if (!source) return null;
-
-                  return { source, target };
-              }).filter((item): item is { source: string, target: string } => item !== null);
-
-              return {
-                  name: file.name,
-                  content: segments.map(s => s.source).join('\n'),
-                  isExcel: true,
-                  segments
-              };
-          } else {
-              // 单列数据：只提取原文
-              const segments = jsonData.map((row) => {
-                  if (!row || row.length < 1) return null;
-
-                  const cellValue = row[0];
-                  if (cellValue === undefined || cellValue === null || cellValue === '') return null;
-
-                  const text = String(cellValue).trim();
-                  if (!text) return null;
-
-                  return { source: text, target: '' };
-              }).filter((item): item is { source: string, target: string } => item !== null);
-
-              return {
-                  name: file.name,
-                  content: segments.map(s => s.source).join('\n'),
-                  isExcel: true,
-                  segments
-              };
-          }
-       } else {
-          return new Promise((resolve) => {
-              const reader = new FileReader();
-              reader.onload = (event) => {
-                  resolve({ name: file.name, content: event.target?.result as string });
-              };
-              reader.readAsText(file);
-          });
-       }
-  };
-
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (files && files.length > 0) {
-      if (!newProjectName.trim()) {
-        const firstFileName = files[0].name;
-        const autoProjectName = firstFileName.replace(/\.[^/.]+$/, '');
-        setNewProjectName(autoProjectName);
-      }
-      setIsParsing(true);
-      try {
-          const promises = Array.from(files).map((file: File) => parseFile(file));
-          const results = await Promise.all(promises);
-          setUploadedFiles(prev => [...prev, ...results]);
-      } catch (error) {
-          console.error("File parsing error", error);
-          alert("部分文件解析失败，请重试");
-      } finally {
-          setIsParsing(false);
-      }
-    }
   };
 
   const handleSingleFileAddChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -473,7 +446,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
       setParsingFileName(file.name);
       setIsParsing(true);
       try {
-          const result = await parseFile(file);
+          const result = await parseProjectFile(file);
           onAddFileToProject(
             targetProjectId,
             result.name,
@@ -481,7 +454,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
             result.isExcel,
             result.segments,
             result.xliffProject,
-            result.sourceBlobId
+            result.sourceBlobId,
+            result.docxImportMode,
+            result.docxBilingualLayout
           );
           setImportFeedback(`已导入「${result.name}」`);
       } catch {
@@ -968,195 +943,6 @@ export const Dashboard: React.FC<DashboardProps> = ({
       alert(messages.join('；'));
   };
 
-  const handleRemoveFile = (index: number) => {
-      setUploadedFiles(prev => prev.filter((_, i) => i !== index));
-  };
-
-  const parseAndCreateProject = () => {
-    if (!newProjectName || uploadedFiles.length === 0) return;
-
-    // 1. Handle Resources
-    let finalMainTmId = mainTmId;
-    let newTM: TranslationMemory | undefined;
-
-    if (mainTmId === 'create-new') {
-        finalMainTmId = `tm-${Date.now()}`;
-        newTM = {
-            id: finalMainTmId,
-            name: newTmName || `${newProjectName} TM`,
-            sourceLang,
-            targetLang,
-            units: [],
-            createdAt: new Date().toISOString().split('T')[0]
-        };
-    } else if (mainTmId === 'none') {
-        finalMainTmId = '';
-    }
-
-    let finalMainTbId = mainTbId;
-    let newTB: TermBase | undefined;
-
-    if (mainTbId === 'create-new') {
-        finalMainTbId = `tb-${Date.now()}`;
-        newTB = {
-            id: finalMainTbId,
-            name: newTbName || `${newProjectName} TB`,
-            sourceLang,
-            targetLang,
-            entries: [],
-            createdAt: new Date().toISOString().split('T')[0]
-        };
-    } else if (mainTbId === 'none') {
-        finalMainTbId = '';
-    }
-
-    // Combine Main + Refs
-    const allTmIds = new Set<string>();
-    if (finalMainTmId) allTmIds.add(finalMainTmId);
-    referenceTmIds.forEach(id => allTmIds.add(id));
-
-    const allTbIds = new Set<string>();
-    if (finalMainTbId) allTbIds.add(finalMainTbId);
-    referenceTbIds.forEach(id => allTbIds.add(id));
-
-    // 2. Create Project Files with Auto-Lock Logic
-    let totalSegments = 0;
-
-    const xliffUpload = uploadedFiles.find((f) => f.isXliff && f.xliffProject);
-    if (xliffUpload?.xliffProject) {
-      const xp = xliffUpload.xliffProject;
-      const langSrc = xp.sourceLang || sourceLang;
-      const langTgt = xp.targetLang || targetLang;
-      const projectFiles: ProjectFile[] = xp.files.map((pf, fileIdx) =>
-        buildProjectFileFromParsed(pf, fileIdx, langSrc)
-      );
-      const totalSegments = projectFiles.reduce((n, f) => n + f.totalSegments, 0);
-      const confirmed = projectFiles.reduce(
-        (n, f) => n + f.segments.filter((s) => s.status === SegmentStatus.Confirmed).length,
-        0
-      );
-      const newProject: Project = {
-        id: `p-${Date.now()}`,
-        name: newProjectName,
-        sourceLang: langSrc,
-        targetLang: langTgt,
-        createdAt: new Date().toISOString().split('T')[0],
-        progress: totalSegments > 0 ? Math.round((confirmed / totalSegments) * 100) : 0,
-        totalSegments,
-        files: projectFiles,
-        mainTmId: finalMainTmId,
-        tmIds: Array.from(allTmIds),
-        mainTbId: finalMainTbId,
-        tbIds: Array.from(allTbIds),
-        grammarRuleBookIds: Array.from(grammarRuleBookIds),
-        regexDictionaryBookIds: Array.from(regexDictionaryBookIds),
-        contextDescription: '',
-        tradosPackage: xp.tradosPackage,
-      };
-      onCreateProject(newProject, newTM, newTB);
-      setIsModalOpen(false);
-      return;
-    }
-
-    const projectFiles: ProjectFile[] = uploadedFiles.map((file, fileIdx) => {
-        let segs: Segment[];
-
-        if (file.isExcel && file.segments) {
-            // 处理Excel文件：使用segments数据
-            segs = file.segments.map((item, index) => {
-                const text = item.source.trim();
-                const translation = item.target ? item.target.trim() : '';
-
-                let isLocked = false;
-                let targetText = '';
-                let status = SegmentStatus.NotStarted;
-
-                // 如果Excel中有翻译内容，使用它
-                if (translation && translation !== text) {
-                    targetText = translation;
-                    status = SegmentStatus.Draft;
-                }
-
-                isLocked = shouldAutoLockSegmentAtImport(text, sourceLang);
-
-                // 如果已锁定，使用原文作为译文
-                if (isLocked) {
-                    targetText = text;
-                    status = SegmentStatus.Confirmed;
-                }
-
-                return {
-                    id: `s-${Date.now()}-${fileIdx}-${index}`,
-                    sourceText: text,
-                    targetText: targetText,
-                    status: status,
-                    matchType: MatchType.None,
-                    isLocked: isLocked,
-                    okapiTuId: item.okapiTuId ?? `p-${index}`,
-                    inlineRunMeta: item.inlineRunMeta,
-                };
-            });
-        } else {
-            // 处理文本文件（txt, docx）
-            segs = file.content
-                .split(/\r?\n/)
-                .map(line => line.trim())
-                .filter(line => line.length > 0)
-                .map((line, index) => {
-                    let isLocked = false;
-                    const text = line.trim();
-
-                    isLocked = shouldAutoLockSegmentAtImport(text, sourceLang);
-
-                    return {
-                        id: `s-${Date.now()}-${fileIdx}-${index}`,
-                        sourceText: line,
-                        targetText: isLocked ? line : '', // Auto-fill
-                        status: isLocked ? SegmentStatus.Confirmed : SegmentStatus.NotStarted,
-                        matchType: MatchType.None,
-                        isLocked: isLocked
-                    };
-                });
-        }
-
-        totalSegments += segs.length;
-
-        // Calculate initial progress based on locked segments
-        const lockedCount = segs.filter(s => s.isLocked).length;
-        const initialProgress = segs.length > 0 ? Math.round((lockedCount / segs.length) * 100) : 0;
-
-        return {
-            id: `f-${Date.now()}-${fileIdx}`,
-            name: file.name,
-            segments: segs,
-            totalSegments: segs.length,
-            progress: initialProgress,
-            sourceBlobId: file.sourceBlobId,
-        };
-    });
-
-    const newProject: Project = {
-        id: `p-${Date.now()}`,
-        name: newProjectName,
-        sourceLang: sourceLang,
-        targetLang: targetLang,
-        createdAt: new Date().toISOString().split('T')[0],
-        progress: totalSegments > 0 ? Math.round((projectFiles.reduce((acc, f) => acc + (f.progress/100 * f.totalSegments), 0) / totalSegments) * 100) : 0,
-        totalSegments: totalSegments,
-        files: projectFiles,
-        mainTmId: finalMainTmId,
-        tmIds: Array.from(allTmIds),
-        mainTbId: finalMainTbId,
-        tbIds: Array.from(allTbIds),
-        grammarRuleBookIds: Array.from(grammarRuleBookIds),
-        regexDictionaryBookIds: Array.from(regexDictionaryBookIds),
-        contextDescription: ''
-    };
-
-    onCreateProject(newProject, newTM, newTB);
-    setIsModalOpen(false);
-  };
-
   const confirmDelete = () => {
       if (projectToDelete) {
           onDeleteProject(projectToDelete);
@@ -1222,36 +1008,11 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
   const targetProjectForFiles = projects.find(p => p.id === targetProjectId);
 
-  // Toggle Ref Helper
-  const toggleRefTm = (id: string) => {
-      const next = new Set(referenceTmIds);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      setReferenceTmIds(next);
-  }
-
-  const toggleRefTb = (id: string) => {
-      const next = new Set(referenceTbIds);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      setReferenceTbIds(next);
-  };
-
-  const matchingGrammarBooks = availableGrammarRuleBooks.filter(
-      (g) => g.sourceLang === sourceLang && g.targetLang === targetLang
-  );
   const settingsMatchingGrammarBooks = settingsProject
       ? availableGrammarRuleBooks.filter(
             (g) => g.sourceLang === settingsProject.sourceLang && g.targetLang === settingsProject.targetLang
         )
       : [];
-
-  const toggleGrammarBook = (id: string) => {
-      const next = new Set(grammarRuleBookIds);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      setGrammarRuleBookIds(next);
-  };
 
   const toggleSettingsGrammarBook = (id: string) => {
       const next = new Set(settingsGrammarRuleBookIds);
@@ -1260,21 +1021,11 @@ export const Dashboard: React.FC<DashboardProps> = ({
       setSettingsGrammarRuleBookIds(next);
   };
 
-  const matchingRegexDictionaryBooks = availableRegexDictionaryBooks.filter(
-      (b) => b.sourceLang === sourceLang && b.targetLang === targetLang
-  );
   const settingsMatchingRegexDictionaryBooks = settingsProject
       ? availableRegexDictionaryBooks.filter(
             (b) => b.sourceLang === settingsProject.sourceLang && b.targetLang === settingsProject.targetLang
         )
       : [];
-
-  const toggleRegexDictionaryBook = (id: string) => {
-      const next = new Set(regexDictionaryBookIds);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      setRegexDictionaryBookIds(next);
-  };
 
   const toggleSettingsRegexDictionaryBook = (id: string) => {
       const next = new Set(settingsRegexDictionaryBookIds);
@@ -1284,358 +1035,206 @@ export const Dashboard: React.FC<DashboardProps> = ({
   };
 
   return (
-    <div className="p-8 h-full overflow-y-auto relative">
-      <div className="flex items-center justify-between mb-8">
-        <div>
-          <h1 className="text-3xl font-black text-slate-900 tracking-tight">项目管理</h1>
-          <p className="text-slate-500 mt-1">
-            {searchQuery ? `搜索 "${searchQuery}" 的结果` : '管理您的翻译项目与任务进度。'}
-          </p>
+    <div className="h-full overflow-y-auto bg-white">
+      {/* Header */}
+      <div className="border-b border-slate-200 px-6">
+        <div className="py-4 text-sm font-medium text-blue-600">
+          我创建的项目 ({projects.length})
         </div>
-        <button 
-          onClick={handleOpenCreateModal}
-          className="flex items-center gap-2 bg-slate-900 hover:bg-slate-800 text-white px-5 py-2.5 rounded-full font-medium shadow-lg shadow-slate-900/20 transition-all hover:scale-110 active:scale-95"
-        >
-          <Icons.File className="w-4 h-4" />
-          <span>新建项目</span>
-        </button>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {filteredProjects.length > 0 ? (
-            filteredProjects.map((project) => (
-            <ProjectCard 
-                key={project.id} 
-                project={project}
-                tmNames={project.tmIds.map(id => availableTMs.find(t => t.id === id)?.name).filter(Boolean) as string[]}
-                tbNames={project.tbIds.map(id => availableTBs.find(t => t.id === id)?.name).filter(Boolean) as string[]}
-                grNames={(project.grammarRuleBookIds ?? [])
-                    .map((id) => availableGrammarRuleBooks.find((g) => g.id === id)?.name)
-                    .filter(Boolean) as string[]}
-                rxNames={(project.regexDictionaryBookIds ?? [])
-                    .map((id) => availableRegexDictionaryBooks.find((g) => g.id === id)?.name)
-                    .filter(Boolean) as string[]}
-                onClick={() => onOpenProject(project.id)} 
-                onDelete={() => promptDelete(project.id)}
-                onManageFiles={() => handleOpenFilesModal(project.id)}
-                onSettings={() => handleOpenSettingsModal(project.id)}
-                onAnalyzeDuplicates={() => handleOpenDuplicateModal(project.id)}
-                onExportSdlxliff={
-                  onTradosQuickExport &&
-                  (project.tradosPackage?.packageBlobId ||
+      {/* Toolbar */}
+      <div className="px-6 py-4 border-b border-slate-100">
+        <div className="flex flex-wrap items-center gap-3">
+          <button
+            type="button"
+            onClick={handleOpenCreateModal}
+            className="inline-flex items-center gap-1.5 rounded bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700 transition-colors shrink-0"
+          >
+            <Icons.Plus className="w-4 h-4" />
+            创建项目
+          </button>
+
+          <select
+            value={searchField}
+            onChange={(e) => setSearchField(e.target.value as SearchField)}
+            className="h-9 rounded border border-slate-200 bg-white px-2 text-sm text-slate-700 outline-none focus:border-blue-400"
+          >
+            <option value="name">项目名称</option>
+          </select>
+
+          <input
+            type="text"
+            value={localSearchInput}
+            onChange={(e) => setLocalSearchInput(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleApplyFilters()}
+            placeholder="请输入项目名称"
+            className="h-9 w-44 rounded border border-slate-200 px-3 text-sm text-slate-700 outline-none focus:border-blue-400 sm:w-52"
+          />
+
+          <select
+            value={dateField}
+            onChange={(e) => setDateField(e.target.value as DateField)}
+            className="h-9 rounded border border-slate-200 bg-white px-2 text-sm text-slate-700 outline-none focus:border-blue-400"
+          >
+            <option value="created">创建日期</option>
+            <option value="delivery">交付日期</option>
+          </select>
+
+          <div className="flex items-center gap-1.5">
+            <input
+              type="date"
+              value={dateStart}
+              onChange={(e) => setDateStart(e.target.value)}
+              className="h-9 rounded border border-slate-200 px-2 text-sm text-slate-600 outline-none focus:border-blue-400"
+              title="开始日期"
+            />
+            <span className="text-slate-400 text-sm">至</span>
+            <input
+              type="date"
+              value={dateEnd}
+              onChange={(e) => setDateEnd(e.target.value)}
+              className="h-9 rounded border border-slate-200 px-2 text-sm text-slate-600 outline-none focus:border-blue-400"
+              title="结束日期"
+            />
+          </div>
+
+          <button
+            type="button"
+            onClick={handleResetFilters}
+            className="h-9 rounded border border-slate-200 bg-white px-4 text-sm text-slate-600 hover:bg-slate-50 transition-colors"
+          >
+            重置
+          </button>
+          <button
+            type="button"
+            onClick={handleApplyFilters}
+            className="h-9 rounded bg-blue-600 px-4 text-sm font-medium text-white hover:bg-blue-700 transition-colors"
+          >
+            确定
+          </button>
+        </div>
+      </div>
+
+      {/* Table */}
+      <div className="px-6 pb-8">
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[960px] text-left border-collapse">
+            <thead>
+              <tr className="border-b border-slate-200 text-sm text-slate-500">
+                <th className="px-4 py-3 font-normal whitespace-nowrap">
+                  <span className="inline-flex items-center gap-1">
+                    项目名称 (类型)
+                    <Icons.ChevronDown className="w-3.5 h-3.5 text-slate-400" />
+                  </span>
+                </th>
+                <th className="px-4 py-3 font-normal whitespace-nowrap">LQA标准</th>
+                <th className="px-4 py-3 font-normal whitespace-nowrap">项目经理</th>
+                <th className="px-4 py-3 font-normal whitespace-nowrap">
+                  <span className="inline-flex items-center gap-1">
+                    语言对
+                    <Icons.ChevronDown className="w-3.5 h-3.5 text-slate-400" />
+                  </span>
+                </th>
+                <th className="px-4 py-3 font-normal whitespace-nowrap">日期</th>
+                <th className="px-4 py-3 font-normal whitespace-nowrap">交付日期</th>
+                <th className="px-4 py-3 font-normal whitespace-nowrap">完成进度</th>
+                <th className="px-4 py-3 font-normal whitespace-nowrap">参与人</th>
+                <th className="px-4 py-3 font-normal whitespace-nowrap text-right">
+                  <span className="inline-flex items-center gap-2 justify-end">
+                    操作
+                    <button type="button" className="text-slate-400 hover:text-slate-600" title="列设置" aria-label="列设置">
+                      <Icons.Settings className="w-4 h-4" />
+                    </button>
+                  </span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {filteredProjects.length > 0 ? (
+                filteredProjects.map((project) => {
+                  const mainTb = project.mainTbId
+                    ? availableTBs.find((t) => t.id === project.mainTbId)
+                    : undefined;
+                  const hasXliff =
+                    project.tradosPackage?.packageBlobId ||
                     project.files.some(
                       (f) =>
                         f.interchangeFormat === 'sdlxliff' ||
                         f.name.toLowerCase().includes('.sdlxliff') ||
                         f.segments.some((s) => s.xliffSegmentId)
-                    ))
-                    ? () => onTradosQuickExport(project.id, 'sdlxliff')
-                    : undefined
-                }
-                onExportSdlrpx={
-                  onTradosQuickExport && project.tradosPackage
-                    ? () => onTradosQuickExport(project.id, 'sdlrpx')
-                    : undefined
-                }
-            />
-            ))
-        ) : (
-            <div className="col-span-full flex flex-col items-center justify-center py-20 text-slate-400">
-                <Icons.Search className="w-12 h-12 mb-4 opacity-20" />
-                <p>未找到匹配的项目</p>
-            </div>
-        )}
+                    );
+                  const hasMqXliff =
+                    project.memoqPackage?.packageBlobId ||
+                    project.files.some(
+                      (f) =>
+                        f.interchangeFormat === 'mqxliff' ||
+                        f.name.toLowerCase().includes('.mqxliff')
+                    );
+                  return (
+                    <ProjectTableRow
+                      key={project.id}
+                      project={project}
+                      mainTbName={mainTb?.name}
+                      onOpen={() => onOpenProject(project.id)}
+                      onDelete={() => promptDelete(project.id)}
+                      onManageFiles={() => handleOpenFilesModal(project.id)}
+                      onSettings={() => handleOpenSettingsModal(project.id)}
+                      onAnalyzeDuplicates={() => handleOpenDuplicateModal(project.id)}
+                      onExportSdlxliff={
+                        onTradosQuickExport && hasXliff
+                          ? () => onTradosQuickExport(project.id, 'sdlxliff')
+                          : undefined
+                      }
+                      onExportSdlrpx={
+                        onTradosQuickExport && project.tradosPackage
+                          ? () => onTradosQuickExport(project.id, 'sdlrpx')
+                          : undefined
+                      }
+                      onExportMqxliff={
+                        onMemoqQuickExport && hasMqXliff
+                          ? () => onMemoqQuickExport(project.id, 'mqxliff')
+                          : undefined
+                      }
+                      onExportMqxlz={
+                        onMemoqQuickExport && project.memoqPackage
+                          ? () => onMemoqQuickExport(project.id, 'mqxlz')
+                          : undefined
+                      }
+                      menuOpen={openMenuId === project.id}
+                      onMenuToggle={() =>
+                        setOpenMenuId((id) => (id === project.id ? null : project.id))
+                      }
+                      onMenuClose={() => setOpenMenuId(null)}
+                    />
+                  );
+                })
+              ) : (
+                <tr>
+                  <td colSpan={9} className="px-4 py-16 text-center text-slate-400">
+                    <Icons.Search className="w-10 h-10 mx-auto mb-3 opacity-20" />
+                    <p className="text-sm">
+                      {combinedSearch || appliedDateStart || appliedDateEnd
+                        ? '未找到匹配的项目'
+                        : '暂无项目，点击「创建项目」开始'}
+                    </p>
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
 
-      {/* New Project Modal */}
-      {isModalOpen && (
-          <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl p-6 animate-in zoom-in-95 duration-200 max-h-[95vh] overflow-y-auto">
-                  <div className="flex justify-between items-center mb-6">
-                      <h2 className="text-xl font-bold text-slate-900">创建新项目向导</h2>
-                      <button onClick={() => setIsModalOpen(false)} className="text-slate-400 hover:text-slate-600">
-                          <Icons.X className="w-5 h-5" />
-                      </button>
-                  </div>
-                  
-                  <div className="space-y-6">
-                      {/* Step 1: Basic Info */}
-                      <div className="space-y-4">
-                          <div>
-                            <label className="block text-sm font-semibold text-slate-700 mb-1">1. 项目名称</label>
-                            <input 
-                                type="text" 
-                                className="w-full border border-slate-300 rounded-lg p-2.5 outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500"
-                                placeholder="例如：2024 Q4 营销文档"
-                                value={newProjectName}
-                                onChange={(e) => setNewProjectName(e.target.value)}
-                            />
-                          </div>
-                          <div className="grid grid-cols-2 gap-4">
-                              <div>
-                                  <label className="block text-sm font-semibold text-slate-700 mb-1">源语言</label>
-                                  <select 
-                                    value={sourceLang}
-                                    onChange={(e) => setSourceLang(e.target.value)}
-                                    className="w-full border border-slate-300 rounded-lg p-2.5 bg-white"
-                                  >
-                                      {SUPPORTED_LANGUAGES.map(lang => (
-                                          <option key={lang.code} value={lang.code}>{lang.name}</option>
-                                      ))}
-                                  </select>
-                              </div>
-                              <div>
-                                  <label className="block text-sm font-semibold text-slate-700 mb-1">目标语言</label>
-                                  <select 
-                                    value={targetLang}
-                                    onChange={(e) => setTargetLang(e.target.value)}
-                                    className="w-full border border-slate-300 rounded-lg p-2.5 bg-white"
-                                  >
-                                      {SUPPORTED_LANGUAGES.map(lang => (
-                                          <option key={lang.code} value={lang.code}>{lang.name}</option>
-                                      ))}
-                                  </select>
-                              </div>
-                          </div>
-                      </div>
-
-                      {/* Step 2: Resource Mapping */}
-                      <div className="bg-slate-50 p-5 rounded-xl border border-slate-200">
-                          <div className="flex items-center gap-2 mb-4">
-                             <Icons.Settings className="w-4 h-4 text-slate-500"/>
-                             <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">2. 资源挂载 (Resource Mapping)</h3>
-                          </div>
-                          
-                          <div className="grid grid-cols-2 gap-6">
-                                {/* Translation Memory Column */}
-                                <div>
-                                    <div className="mb-3">
-                                        <label className="block text-xs font-bold text-blue-600 mb-1">主记忆库 (Main TM) <span className="font-normal text-slate-400">- 写入/更新</span></label>
-                                        <select 
-                                            value={mainTmId}
-                                            onChange={(e) => setMainTmId(e.target.value)}
-                                            className="w-full border border-slate-300 rounded-lg p-2 bg-white text-sm"
-                                        >
-                                            <option value="none">无 (None)</option>
-                                            {availableTMs.map(tm => (
-                                                <option key={tm.id} value={tm.id}>{tm.name}</option>
-                                            ))}
-                                            <option value="create-new" className="text-blue-600 font-bold">+ 新建空白 TM</option>
-                                        </select>
-                                        {mainTmId === 'create-new' && (
-                                            <input 
-                                                type="text" 
-                                                placeholder="输入新 TM 名称"
-                                                value={newTmName}
-                                                onChange={(e) => setNewTmName(e.target.value)}
-                                                className="w-full mt-2 border border-blue-300 bg-blue-50/50 rounded-lg p-2 text-sm focus:bg-white"
-                                            />
-                                        )}
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs font-bold text-slate-500 mb-1">参考记忆库 (Reference TMs)</label>
-                                        <div className="border border-slate-200 rounded-lg bg-white max-h-32 overflow-y-auto p-1">
-                                            {availableTMs.filter(tm => tm.id !== mainTmId).length > 0 ? (
-                                                availableTMs.filter(tm => tm.id !== mainTmId).map(tm => (
-                                                    <label key={tm.id} className="flex items-center gap-2 p-1.5 hover:bg-slate-50 rounded cursor-pointer">
-                                                        <input 
-                                                            type="checkbox" 
-                                                            checked={referenceTmIds.has(tm.id)}
-                                                            onChange={() => toggleRefTm(tm.id)}
-                                                            className="rounded border-slate-300 text-blue-600"
-                                                        />
-                                                        <span className="text-xs truncate">{tm.name}</span>
-                                                    </label>
-                                                ))
-                                            ) : (
-                                                <p className="text-xs text-slate-400 p-2">无其他可用 TM</p>
-                                            )}
-                                        </div>
-                                    </div>
-                                </div>
-
-                                {/* Term Base Column */}
-                                <div>
-                                    <div className="mb-3">
-                                        <label className="block text-xs font-bold text-red-600 mb-1">主术语库 (Main TB) <span className="font-normal text-slate-400">- 写入/QA</span></label>
-                                        <select 
-                                            value={mainTbId}
-                                            onChange={(e) => setMainTbId(e.target.value)}
-                                            className="w-full border border-slate-300 rounded-lg p-2 bg-white text-sm"
-                                        >
-                                            <option value="none">无 (None)</option>
-                                            {availableTBs.map(tb => (
-                                                <option key={tb.id} value={tb.id}>{tb.name}</option>
-                                            ))}
-                                            <option value="create-new" className="text-blue-600 font-bold">+ 新建空白 TB</option>
-                                        </select>
-                                        {mainTbId === 'create-new' && (
-                                            <input 
-                                                type="text" 
-                                                placeholder="输入新 TB 名称"
-                                                value={newTbName}
-                                                onChange={(e) => setNewTbName(e.target.value)}
-                                                className="w-full mt-2 border border-blue-300 bg-blue-50/50 rounded-lg p-2 text-sm focus:bg-white"
-                                            />
-                                        )}
-                                    </div>
-                                    <div>
-                                        <label className="block text-xs font-bold text-slate-500 mb-1">参考术语库 (Reference TBs)</label>
-                                        <div className="border border-slate-200 rounded-lg bg-white max-h-32 overflow-y-auto p-1">
-                                            {availableTBs.filter(tb => tb.id !== mainTbId).length > 0 ? (
-                                                availableTBs.filter(tb => tb.id !== mainTbId).map(tb => (
-                                                    <label key={tb.id} className="flex items-center gap-2 p-1.5 hover:bg-slate-50 rounded cursor-pointer">
-                                                        <input 
-                                                            type="checkbox" 
-                                                            checked={referenceTbIds.has(tb.id)}
-                                                            onChange={() => toggleRefTb(tb.id)}
-                                                            className="rounded border-slate-300 text-red-600"
-                                                        />
-                                                        <span className="text-xs truncate">{tb.name}</span>
-                                                    </label>
-                                                ))
-                                            ) : (
-                                                <p className="text-xs text-slate-400 p-2">无其他可用 TB</p>
-                                            )}
-                                        </div>
-                                    </div>
-                                </div>
-                          </div>
-
-                          <div className="mt-4 border-t border-slate-200 pt-4">
-                              <div className="mb-2 flex items-center gap-2">
-                                  <Icons.Concordance className="h-4 w-4 text-amber-600" />
-                                  <h4 className="text-xs font-bold uppercase tracking-wider text-slate-600">规则词典（可选）</h4>
-                              </div>
-                              <p className="mb-2 text-[10px] text-slate-500">
-                                  仅列出与上方源/目标语言一致的词典。整句匹配句式后，可变部分单独送 AI 翻译，再填入译文模板。
-                              </p>
-                              <div className="max-h-28 overflow-y-auto rounded-lg border border-slate-200 bg-white p-1">
-                                  {matchingGrammarBooks.length > 0 ? (
-                                      matchingGrammarBooks.map((g) => (
-                                          <label
-                                              key={g.id}
-                                              className="flex cursor-pointer items-center gap-2 rounded p-1.5 hover:bg-slate-50"
-                                          >
-                                              <input
-                                                  type="checkbox"
-                                                  checked={grammarRuleBookIds.has(g.id)}
-                                                  onChange={() => toggleGrammarBook(g.id)}
-                                                  className="rounded border-slate-300 text-amber-600"
-                                              />
-                                              <span className="truncate text-xs">{g.name}</span>
-                                              <span className="shrink-0 text-[10px] text-slate-400">({g.rules.length})</span>
-                                          </label>
-                                      ))
-                                  ) : (
-                                      <p className="p-2 text-xs text-slate-400">无匹配语言对的规则词典，可在「语言资源」中创建</p>
-                                  )}
-                              </div>
-                          </div>
-
-                          <div className="mt-4 border-t border-slate-200 pt-4">
-                              <div className="mb-2 flex items-center gap-2">
-                                  <Icons.RegexDict className="h-4 w-4 text-violet-600" />
-                                  <h4 className="text-xs font-bold uppercase tracking-wider text-slate-600">
-                                      正则表达式词典（可选）
-                                  </h4>
-                              </div>
-                              <p className="mb-2 text-[10px] text-slate-500">
-                                  无「类别」的条目在句段翻译前优先替换；有「类别」的可被规则词典 {'{类别}'} 引用。建议规则总数小于 1000。
-                              </p>
-                              <div className="max-h-28 overflow-y-auto rounded-lg border border-slate-200 bg-white p-1">
-                                  {matchingRegexDictionaryBooks.length > 0 ? (
-                                      matchingRegexDictionaryBooks.map((g) => (
-                                          <label
-                                              key={g.id}
-                                              className="flex cursor-pointer items-center gap-2 rounded p-1.5 hover:bg-slate-50"
-                                          >
-                                              <input
-                                                  type="checkbox"
-                                                  checked={regexDictionaryBookIds.has(g.id)}
-                                                  onChange={() => toggleRegexDictionaryBook(g.id)}
-                                                  className="rounded border-slate-300 text-violet-600"
-                                              />
-                                              <span className="truncate text-xs">{g.name}</span>
-                                              <span className="shrink-0 text-[10px] text-slate-400">
-                                                  ({g.entries.length})
-                                              </span>
-                                          </label>
-                                      ))
-                                  ) : (
-                                      <p className="p-2 text-xs text-slate-400">
-                                          无匹配语言对的正则词典，可在「语言资源」中创建
-                                      </p>
-                                  )}
-                              </div>
-                          </div>
-                      </div>
-
-                      {/* Step 3: File Upload */}
-                      <div>
-                        <label className="block text-sm font-semibold text-slate-700 mb-1">3. 导入原文 (支持多文件)</label>
-                        <div 
-                            className={`border-2 border-dashed rounded-xl p-6 flex flex-col items-center justify-center cursor-pointer transition-colors ${
-                                isParsing ? 'bg-slate-50 border-blue-400 cursor-wait' : 'border-slate-300 hover:bg-slate-50 hover:border-blue-400'
-                            }`}
-                            onClick={() => !isParsing && fileInputRef.current?.click()}
-                        >
-                            {isParsing ? (
-                                <Icons.Refresh className="w-6 h-6 mb-2 text-blue-500 animate-spin" />
-                            ) : (
-                                <Icons.Upload className="w-6 h-6 mb-2 text-slate-400" />
-                            )}
-                            <span className="text-sm text-slate-500">
-                                {uploadedFiles.length > 0 ? `已选择 ${uploadedFiles.length} 个文件` : '点击批量上传（含 .sdlxliff / .mqxliff / .sdlppx）'}
-                            </span>
-                            <input
-                                type="file"
-                                accept=".txt,.docx,.xlsx,.xls,.html,.htm,.idml,.sdlxliff,.mqxliff,.sdlppx,.sdlrpx,.xlf"
-                                ref={fileInputRef}
-                                onChange={handleFileChange}
-                                className="hidden"
-                                multiple
-                            />
-                        </div>
-                        
-                        {/* File List */}
-                        {uploadedFiles.length > 0 && (
-                            <div className="mt-3 space-y-2 max-h-32 overflow-y-auto">
-                                {uploadedFiles.map((f, i) => (
-                                    <div key={i} className="flex justify-between items-center bg-slate-50 px-3 py-2 rounded-lg border border-slate-100 text-xs">
-                                        <div className="flex items-center gap-2 truncate">
-                                            <Icons.File className="w-3 h-3 text-slate-400"/>
-                                            <span className="truncate max-w-[200px]">{f.name}</span>
-                                        </div>
-                                        <button onClick={() => handleRemoveFile(i)} className="text-slate-400 hover:text-red-500">
-                                            <Icons.X className="w-3 h-3" />
-                                        </button>
-                                    </div>
-                                ))}
-                            </div>
-                        )}
-                      </div>
-
-                  </div>
-
-                  <div className="flex justify-end gap-3 mt-8">
-                      <button 
-                        onClick={() => setIsModalOpen(false)}
-                        className="px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100 rounded-lg"
-                      >
-                          取消
-                      </button>
-                      <button 
-                        onClick={parseAndCreateProject}
-                        disabled={!newProjectName || uploadedFiles.length === 0 || isParsing}
-                        className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-md shadow-blue-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
-                      >
-                          创建项目
-                      </button>
-                  </div>
-              </div>
-          </div>
-      )}
+      <ProjectCreateWizard
+        isOpen={isModalOpen}
+        availableTMs={availableTMs}
+        availableTBs={availableTBs}
+        availableGrammarRuleBooks={availableGrammarRuleBooks}
+        availableRegexDictionaryBooks={availableRegexDictionaryBooks}
+        onCreateProject={onCreateProject}
+        onClose={() => setIsModalOpen(false)}
+      />
 
       {/* Files Manager Modal (List + Add) */}
       {isFilesModalOpen && targetProjectForFiles && (
@@ -1713,7 +1312,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                             </span>
                             <input
                                 type="file"
-                                accept=".txt,.docx,.xlsx,.xls,.html,.htm,.idml,.sdlxliff,.mqxliff,.sdlppx,.sdlrpx,.xlf"
+                                accept=".txt,.docx,.pptx,.xlsx,.xls,.html,.htm,.idml,.sdlxliff,.mqxliff,.mqxlz,.sdlppx,.sdlrpx,.xlf"
                                 ref={addFileInputRef}
                                 onChange={handleSingleFileAddChange}
                                 className="hidden"
@@ -2109,277 +1708,290 @@ export const Dashboard: React.FC<DashboardProps> = ({
       {/* Project Settings Modal */}
       {isSettingsModalOpen && settingsProject && (
           <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl p-6 animate-in zoom-in-95 duration-200 max-h-[95vh] overflow-y-auto">
-                  <div className="flex justify-between items-center mb-6">
+              <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl flex flex-col max-h-[90vh] animate-in zoom-in-95 duration-200">
+                  <div className="flex justify-between items-center px-6 pt-6 pb-0 shrink-0">
                       <h2 className="text-xl font-bold text-slate-900">项目设置</h2>
                       <button onClick={() => setIsSettingsModalOpen(false)} className="text-slate-400 hover:text-slate-600">
                           <Icons.X className="w-5 h-5" />
                       </button>
                   </div>
 
-                  <div className="mb-8 rounded-xl border border-slate-200 bg-slate-50 p-5">
-                      <label className="mb-2 block text-xs font-bold uppercase tracking-wider text-slate-500">
-                          项目名称
-                      </label>
-                      <input
-                          type="text"
-                          value={settingsProjectName}
-                          onChange={(e) => setSettingsProjectName(e.target.value)}
-                          className="w-full rounded-lg border border-slate-300 bg-white p-2.5 text-sm text-slate-900 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-                          placeholder="输入项目名称"
-                          autoComplete="off"
-                      />
-                      <div className="mt-4 flex flex-wrap items-start gap-4">
-                          <div className="min-w-[200px] flex-1">
-                              <label className="mb-2 block text-xs font-bold uppercase tracking-wider text-slate-500">
-                                  交稿时间
-                              </label>
-                              <input
-                                  type="datetime-local"
-                                  step={60}
-                                  value={settingsDeliveryDueAt}
-                                  onChange={(e) => setSettingsDeliveryDueAt(e.target.value)}
-                                  className="w-full rounded-lg border border-slate-300 bg-white p-2.5 text-sm text-slate-900 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-                              />
-                              <p className="mt-1 text-[10px] text-slate-400">
-                                  留空表示未设置。开启「截止时间预警」且未勾选「项目已完成」时，翻译界面将按该时刻在截止前 7 天内分级提醒。
-                              </p>
-                          </div>
-                          <div className="flex shrink-0 flex-col gap-2 pt-8">
-                              <label className="flex cursor-pointer items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2.5 shadow-sm">
+                  <div className="flex gap-6 px-6 border-b border-slate-200 shrink-0 mt-4">
+                      {(
+                          [
+                              { id: 'info' as const, label: '项目信息' },
+                              { id: 'terminology' as const, label: '术语库' },
+                              { id: 'memory' as const, label: '记忆库' },
+                              { id: 'dictionaries' as const, label: '词典' },
+                          ] as const
+                      ).map((tab) => (
+                          <button
+                              key={tab.id}
+                              type="button"
+                              onClick={() => setSettingsTab(tab.id)}
+                              className={`relative pb-3 text-sm font-medium transition-colors ${
+                                  settingsTab === tab.id
+                                      ? 'text-blue-600'
+                                      : 'text-slate-600 hover:text-slate-900'
+                              }`}
+                          >
+                              {tab.label}
+                              {settingsTab === tab.id && (
+                                  <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-blue-600 rounded-full" />
+                              )}
+                          </button>
+                      ))}
+                  </div>
+
+                  <div className="flex-1 min-h-0 overflow-y-auto px-6 py-5">
+                      {settingsTab === 'info' && (
+                          <div className="space-y-4">
+                              <div>
+                                  <label className="mb-2 block text-sm font-semibold text-slate-700">项目名称</label>
+                                  <input
+                                      type="text"
+                                      value={settingsProjectName}
+                                      onChange={(e) => setSettingsProjectName(e.target.value)}
+                                      className="w-full rounded-lg border border-slate-300 bg-white p-2.5 text-sm text-slate-900 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                                      placeholder="输入项目名称"
+                                      autoComplete="off"
+                                  />
+                              </div>
+                              <div className="flex flex-wrap items-start gap-4">
+                                  <div className="min-w-[200px] flex-1">
+                                      <label className="mb-2 block text-sm font-semibold text-slate-700">交稿时间</label>
+                                      <input
+                                          type="datetime-local"
+                                          step={60}
+                                          value={settingsDeliveryDueAt}
+                                          onChange={(e) => setSettingsDeliveryDueAt(e.target.value)}
+                                          className="w-full rounded-lg border border-slate-300 bg-white p-2.5 text-sm text-slate-900 outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+                                      />
+                                      <p className="mt-1 text-xs text-slate-400">
+                                          留空表示未设置。开启「截止时间预警」且未勾选「项目已完成」时，翻译界面将按该时刻在截止前 7 天内分级提醒。
+                                      </p>
+                                  </div>
+                                  <div className="flex shrink-0 flex-col gap-2 pt-8">
+                                      <label className="flex cursor-pointer items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2.5">
+                                          <input
+                                              type="checkbox"
+                                              checked={settingsDeliveryReminderEnabled}
+                                              onChange={(e) => setSettingsDeliveryReminderEnabled(e.target.checked)}
+                                              className="text-blue-600"
+                                          />
+                                          <span className="text-sm font-medium text-slate-800 whitespace-nowrap">
+                                              截止时间预警
+                                          </span>
+                                      </label>
+                                      {settingsDeliveryDueAt ? (
+                                          <button
+                                              type="button"
+                                              onClick={() => setSettingsDeliveryDueAt('')}
+                                              className="rounded-lg px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-100 self-start"
+                                          >
+                                              清除时间
+                                          </button>
+                                      ) : null}
+                                  </div>
+                              </div>
+                              <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-slate-200 bg-slate-50 p-4">
                                   <input
                                       type="checkbox"
-                                      checked={settingsDeliveryReminderEnabled}
-                                      onChange={(e) => setSettingsDeliveryReminderEnabled(e.target.checked)}
-                                      className="text-blue-600"
+                                      checked={settingsProjectCompleted}
+                                      onChange={(e) => setSettingsProjectCompleted(e.target.checked)}
+                                      className="mt-0.5 text-emerald-600"
                                   />
-                                  <span className="text-sm font-medium text-slate-800 whitespace-nowrap">
-                                      截止时间预警
+                                  <span>
+                                      <span className="block text-sm font-medium text-slate-800">项目已完成</span>
+                                      <span className="mt-0.5 block text-xs text-slate-500">
+                                          适用于已交稿或无需再跟进的任务；开启后翻译界面不再显示交稿倒计时提醒。
+                                      </span>
                                   </span>
                               </label>
-                              {settingsDeliveryDueAt ? (
-                                  <button
-                                      type="button"
-                                      onClick={() => setSettingsDeliveryDueAt('')}
-                                      className="rounded-lg px-3 py-2 text-xs font-medium text-slate-600 hover:bg-slate-200 self-start"
-                                  >
-                                      清除时间
-                                  </button>
-                              ) : null}
                           </div>
-                      </div>
-                      <label className="mt-4 flex cursor-pointer items-start gap-3 rounded-lg border border-slate-200 bg-white p-3">
-                          <input
-                              type="checkbox"
-                              checked={settingsProjectCompleted}
-                              onChange={(e) => setSettingsProjectCompleted(e.target.checked)}
-                              className="mt-0.5 text-emerald-600"
-                          />
-                          <span>
-                              <span className="block text-sm font-medium text-slate-800">项目已完成</span>
-                              <span className="mt-0.5 block text-[11px] text-slate-500">
-                                  适用于已交稿或无需再跟进的任务；开启后翻译界面不再显示交稿倒计时提醒。
-                              </span>
-                          </span>
-                      </label>
-                  </div>
-                  
-                  <div className="space-y-8">
-                      {/* Term Base Management */}
-                      <div className="bg-slate-50 p-5 rounded-xl border border-slate-200">
-                          <div className="flex items-center gap-2 mb-4">
-                             <Icons.TermBase className="w-4 h-4 text-red-500"/>
-                             <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">术语库管理</h3>
-                          </div>
-                          
+                      )}
+
+                      {settingsTab === 'terminology' && (
                           <div className="space-y-4">
-                              {/* QA Term Base Selection */}
+                              <div className="flex items-center gap-2 mb-1">
+                                  <Icons.TermBase className="w-4 h-4 text-red-500" />
+                                  <h3 className="text-sm font-semibold text-slate-800">术语库管理</h3>
+                              </div>
                               <div>
                                   <label className="block text-xs font-bold text-red-600 mb-2">QA术语库 (唯一)</label>
-                                  <select 
+                                  <select
                                       value={settingsMainTbId}
                                       onChange={(e) => setSettingsMainTbId(e.target.value)}
-                                      className="w-full border border-slate-300 rounded-lg p-2 bg-white text-sm"
+                                      className="w-full border border-slate-300 rounded-lg p-2.5 bg-white text-sm"
                                   >
                                       <option value="">无 (None)</option>
-                                      {availableTBs.map(tb => (
+                                      {availableTBs.map((tb) => (
                                           <option key={tb.id} value={tb.id}>{tb.name}</option>
                                       ))}
                                   </select>
-                                  <p className="text-[10px] text-slate-400 mt-1">QA检查时仅使用此术语库</p>
+                                  <p className="text-xs text-slate-400 mt-1">QA检查时仅使用此术语库</p>
                               </div>
-                              
-                              {/* Reference Term Bases */}
                               <div>
                                   <label className="block text-xs font-bold text-slate-500 mb-2">参考术语库</label>
-                                  <div className="border border-slate-200 rounded-lg bg-white max-h-48 overflow-y-auto">
-                                      {availableTBs.map(tb => (
-                                          <label key={tb.id} className="flex items-center gap-3 p-3 hover:bg-slate-50 border-b border-slate-100 last:border-b-0">
-                                              <input 
-                                                  type="checkbox" 
+                                  <div className="border border-slate-200 rounded-lg bg-white max-h-64 overflow-y-auto">
+                                      {availableTBs.map((tb) => (
+                                          <label key={tb.id} className="flex items-center gap-3 p-3 hover:bg-slate-50 border-b border-slate-100 last:border-b-0 cursor-pointer">
+                                              <input
+                                                  type="checkbox"
                                                   checked={settingsReferenceTbIds.has(tb.id)}
                                                   onChange={(e) => {
                                                       const newSet = new Set(settingsReferenceTbIds);
-                                                      if (e.target.checked) {
-                                                          newSet.add(tb.id);
-                                                      } else {
-                                                          newSet.delete(tb.id);
-                                                      }
+                                                      if (e.target.checked) newSet.add(tb.id);
+                                                      else newSet.delete(tb.id);
                                                       setSettingsReferenceTbIds(newSet);
                                                   }}
                                                   className="text-slate-600"
                                                   disabled={tb.id === settingsMainTbId}
                                               />
-                                              <div className="flex-1">
+                                              <div className="flex-1 min-w-0">
                                                   <div className="text-sm font-medium text-slate-800">{tb.name}</div>
                                                   <div className="text-xs text-slate-400">{tb.entries.length} 个条目</div>
                                               </div>
                                               {tb.id === settingsMainTbId && (
-                                                  <span className="text-xs bg-red-100 text-red-600 px-2 py-1 rounded-full font-medium">QA</span>
+                                                  <span className="text-xs bg-red-100 text-red-600 px-2 py-1 rounded-full font-medium shrink-0">QA</span>
                                               )}
                                           </label>
                                       ))}
                                   </div>
                               </div>
                           </div>
-                      </div>
-                      
-                      {/* Translation Memory Management */}
-                      <div className="bg-slate-50 p-5 rounded-xl border border-slate-200">
-                          <div className="flex items-center gap-2 mb-4">
-                             <Icons.Database className="w-4 h-4 text-blue-500"/>
-                             <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider">记忆库管理</h3>
-                          </div>
-                          
+                      )}
+
+                      {settingsTab === 'memory' && (
                           <div className="space-y-4">
-                              {/* Main TM Selection */}
+                              <div className="flex items-center gap-2 mb-1">
+                                  <Icons.Database className="w-4 h-4 text-blue-500" />
+                                  <h3 className="text-sm font-semibold text-slate-800">记忆库管理</h3>
+                              </div>
                               <div>
                                   <label className="block text-xs font-bold text-blue-600 mb-2">可更新记忆库</label>
-                                  <select 
+                                  <select
                                       value={settingsMainTmId}
                                       onChange={(e) => setSettingsMainTmId(e.target.value)}
-                                      className="w-full border border-slate-300 rounded-lg p-2 bg-white text-sm"
+                                      className="w-full border border-slate-300 rounded-lg p-2.5 bg-white text-sm"
                                   >
                                       <option value="">无 (None)</option>
-                                      {availableTMs.map(tm => (
+                                      {availableTMs.map((tm) => (
                                           <option key={tm.id} value={tm.id}>{tm.name}</option>
                                       ))}
                                   </select>
-                                  <p className="text-[10px] text-slate-400 mt-1">翻译过程中会更新此记忆库</p>
+                                  <p className="text-xs text-slate-400 mt-1">翻译过程中会更新此记忆库</p>
                               </div>
-                              
-                              {/* Reference TMs */}
                               <div>
                                   <label className="block text-xs font-bold text-slate-500 mb-2">参考记忆库</label>
-                                  <div className="border border-slate-200 rounded-lg bg-white max-h-48 overflow-y-auto">
-                                      {availableTMs.map(tm => (
-                                          <label key={tm.id} className="flex items-center gap-3 p-3 hover:bg-slate-50 border-b border-slate-100 last:border-b-0">
-                                              <input 
-                                                  type="checkbox" 
+                                  <div className="border border-slate-200 rounded-lg bg-white max-h-64 overflow-y-auto">
+                                      {availableTMs.map((tm) => (
+                                          <label key={tm.id} className="flex items-center gap-3 p-3 hover:bg-slate-50 border-b border-slate-100 last:border-b-0 cursor-pointer">
+                                              <input
+                                                  type="checkbox"
                                                   checked={settingsReferenceTmIds.has(tm.id)}
                                                   onChange={(e) => {
                                                       const newSet = new Set(settingsReferenceTmIds);
-                                                      if (e.target.checked) {
-                                                          newSet.add(tm.id);
-                                                      } else {
-                                                          newSet.delete(tm.id);
-                                                      }
+                                                      if (e.target.checked) newSet.add(tm.id);
+                                                      else newSet.delete(tm.id);
                                                       setSettingsReferenceTmIds(newSet);
                                                   }}
                                                   className="text-slate-600"
                                                   disabled={tm.id === settingsMainTmId}
                                               />
-                                              <div className="flex-1">
+                                              <div className="flex-1 min-w-0">
                                                   <div className="text-sm font-medium text-slate-800">{tm.name}</div>
                                                   <div className="text-xs text-slate-400">{tm.units.length} 个条目</div>
                                               </div>
                                               {tm.id === settingsMainTmId && (
-                                                  <span className="text-xs bg-blue-100 text-blue-600 px-2 py-1 rounded-full font-medium">可更新</span>
+                                                  <span className="text-xs bg-blue-100 text-blue-600 px-2 py-1 rounded-full font-medium shrink-0">可更新</span>
                                               )}
                                           </label>
                                       ))}
                                   </div>
                               </div>
                           </div>
-                      </div>
+                      )}
 
-                      <div className="rounded-xl border border-slate-200 bg-slate-50 p-5">
-                          <div className="mb-4 flex items-center gap-2">
-                              <Icons.Concordance className="h-4 w-4 text-amber-600" />
-                              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500">规则词典</h3>
-                          </div>
-                          <p className="mb-3 text-[10px] text-slate-500">
-                              勾选要在本项目中启用的规则词典（语言对须与项目一致）。未勾选则句段翻译不使用句式模板。
-                          </p>
-                          <div className="max-h-48 overflow-y-auto rounded-lg border border-slate-200 bg-white">
-                              {settingsMatchingGrammarBooks.length > 0 ? (
-                                  settingsMatchingGrammarBooks.map((g) => (
-                                      <label
-                                          key={g.id}
-                                          className="flex cursor-pointer items-center gap-3 border-b border-slate-100 p-3 last:border-b-0 hover:bg-slate-50"
-                                      >
-                                          <input
-                                              type="checkbox"
-                                              checked={settingsGrammarRuleBookIds.has(g.id)}
-                                              onChange={() => toggleSettingsGrammarBook(g.id)}
-                                              className="text-amber-600"
-                                          />
-                                          <div className="min-w-0 flex-1">
-                                              <div className="text-sm font-medium text-slate-800">{g.name}</div>
-                                              <div className="text-xs text-slate-400">{g.rules.length} 条规则</div>
-                                          </div>
-                                      </label>
-                                  ))
-                              ) : (
-                                  <p className="p-4 text-sm text-slate-400">无匹配语言对的规则词典</p>
-                              )}
-                          </div>
-                      </div>
+                      {settingsTab === 'dictionaries' && (
+                          <div className="space-y-6">
+                              <div>
+                                  <div className="mb-3 flex items-center gap-2">
+                                      <Icons.Concordance className="h-4 w-4 text-amber-600" />
+                                      <h3 className="text-sm font-semibold text-slate-800">规则词典</h3>
+                                  </div>
+                                  <p className="mb-3 text-xs text-slate-500">
+                                      勾选要在本项目中启用的规则词典（语言对须与项目一致）。未勾选则句段翻译不使用句式模板。
+                                  </p>
+                                  <div className="max-h-52 overflow-y-auto rounded-lg border border-slate-200 bg-white">
+                                      {settingsMatchingGrammarBooks.length > 0 ? (
+                                          settingsMatchingGrammarBooks.map((g) => (
+                                              <label
+                                                  key={g.id}
+                                                  className="flex cursor-pointer items-center gap-3 border-b border-slate-100 p-3 last:border-b-0 hover:bg-slate-50"
+                                              >
+                                                  <input
+                                                      type="checkbox"
+                                                      checked={settingsGrammarRuleBookIds.has(g.id)}
+                                                      onChange={() => toggleSettingsGrammarBook(g.id)}
+                                                      className="text-amber-600"
+                                                  />
+                                                  <div className="min-w-0 flex-1">
+                                                      <div className="text-sm font-medium text-slate-800">{g.name}</div>
+                                                      <div className="text-xs text-slate-400">{g.rules.length} 条规则</div>
+                                                  </div>
+                                              </label>
+                                          ))
+                                      ) : (
+                                          <p className="p-4 text-sm text-slate-400">无匹配语言对的规则词典</p>
+                                      )}
+                                  </div>
+                              </div>
 
-                      <div className="rounded-xl border border-slate-200 bg-slate-50 p-5">
-                          <div className="mb-4 flex items-center gap-2">
-                              <Icons.RegexDict className="h-4 w-4 text-violet-600" />
-                              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500">
-                                  正则表达式词典
-                              </h3>
+                              <div>
+                                  <div className="mb-3 flex items-center gap-2">
+                                      <Icons.RegexDict className="h-4 w-4 text-violet-600" />
+                                      <h3 className="text-sm font-semibold text-slate-800">正则表达式词典</h3>
+                                  </div>
+                                  <p className="mb-3 text-xs text-slate-500">
+                                      勾选要在本项目中启用的正则词典（语言对须与项目一致）。
+                                  </p>
+                                  <div className="max-h-52 overflow-y-auto rounded-lg border border-slate-200 bg-white">
+                                      {settingsMatchingRegexDictionaryBooks.length > 0 ? (
+                                          settingsMatchingRegexDictionaryBooks.map((g) => (
+                                              <label
+                                                  key={g.id}
+                                                  className="flex cursor-pointer items-center gap-3 border-b border-slate-100 p-3 last:border-b-0 hover:bg-slate-50"
+                                              >
+                                                  <input
+                                                      type="checkbox"
+                                                      checked={settingsRegexDictionaryBookIds.has(g.id)}
+                                                      onChange={() => toggleSettingsRegexDictionaryBook(g.id)}
+                                                      className="text-violet-600"
+                                                  />
+                                                  <div className="min-w-0 flex-1">
+                                                      <div className="text-sm font-medium text-slate-800">{g.name}</div>
+                                                      <div className="text-xs text-slate-400">{g.entries.length} 条表达式</div>
+                                                  </div>
+                                              </label>
+                                          ))
+                                      ) : (
+                                          <p className="p-4 text-sm text-slate-400">无匹配语言对的正则词典</p>
+                                      )}
+                                  </div>
+                              </div>
                           </div>
-                          <p className="mb-3 text-[10px] text-slate-500">
-                              勾选要在本项目中启用的正则词典（语言对须与项目一致）。
-                          </p>
-                          <div className="max-h-48 overflow-y-auto rounded-lg border border-slate-200 bg-white">
-                              {settingsMatchingRegexDictionaryBooks.length > 0 ? (
-                                  settingsMatchingRegexDictionaryBooks.map((g) => (
-                                      <label
-                                          key={g.id}
-                                          className="flex cursor-pointer items-center gap-3 border-b border-slate-100 p-3 last:border-b-0 hover:bg-slate-50"
-                                      >
-                                          <input
-                                              type="checkbox"
-                                              checked={settingsRegexDictionaryBookIds.has(g.id)}
-                                              onChange={() => toggleSettingsRegexDictionaryBook(g.id)}
-                                              className="text-violet-600"
-                                          />
-                                          <div className="min-w-0 flex-1">
-                                              <div className="text-sm font-medium text-slate-800">{g.name}</div>
-                                              <div className="text-xs text-slate-400">{g.entries.length} 条表达式</div>
-                                          </div>
-                                      </label>
-                                  ))
-                              ) : (
-                                  <p className="p-4 text-sm text-slate-400">无匹配语言对的正则词典</p>
-                              )}
-                          </div>
-                      </div>
+                      )}
                   </div>
 
-                  <div className="flex justify-end gap-3 mt-8">
-                      <button 
+                  <div className="flex justify-end gap-3 px-6 py-4 border-t border-slate-200 shrink-0">
+                      <button
                         onClick={() => setIsSettingsModalOpen(false)}
                         className="px-4 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100 rounded-lg"
                       >
                           取消
                       </button>
-                      <button 
+                      <button
                         onClick={handleSaveSettings}
                         className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-md shadow-blue-500/20"
                       >

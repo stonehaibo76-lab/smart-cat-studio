@@ -2,7 +2,7 @@
  * Assemble Smart-CAT Studio Windows portable zip (self-contained Node + Python).
  * Run on Windows x64: npm run build:portable
  */
-import { execSync } from 'node:child_process';
+import { execSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -257,9 +257,17 @@ function ensureEmbeddedPython() {
     if (!fs.existsSync(getPip)) {
       await downloadFile(MANIFEST.getPipUrl, getPip);
     }
-    const sitePackages = path.join(resolvedPythonDir, 'Lib', 'site-packages', 'uvicorn');
-    if (!fs.existsSync(sitePackages)) {
-      log('Installing Python sidecar dependencies (first time may take a few minutes)…');
+    const pythonExe = path.join(resolvedPythonDir, 'python.exe');
+    const okapiDir = path.join(PROJECT_ROOT, 'scripts', 'okapi-sidecar');
+    const depsOk =
+      fs.existsSync(path.join(resolvedPythonDir, 'Lib', 'site-packages', 'uvicorn')) &&
+      spawnSync(
+        `"${pythonExe}"`,
+        ['-c', 'import pptx; from pptx_handler import extract_pptx'],
+        { shell: true, stdio: 'ignore', windowsHide: true, cwd: okapiDir }
+      ).status === 0;
+    if (!depsOk) {
+      log('Installing Python sidecar dependencies (DOCX/PPTX/HTML/TXT; first time may take a few minutes)…');
       setupPythonEmbed(resolvedPythonDir);
     }
     return resolvedPythonDir;
@@ -325,7 +333,7 @@ function assembleStaging(nodeDir, pythonDir) {
 
   fs.writeFileSync(
     path.join(STAGING, 'README-PORTABLE.txt'),
-    `Smart-CAT Studio V1.8.0 Portable
+    `Smart-CAT Studio V1.8.1 Portable
 ================================
 
 1. Extract this ZIP to a normal folder (not a cloud-sync folder).

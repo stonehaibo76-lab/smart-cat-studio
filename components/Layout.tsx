@@ -10,11 +10,22 @@ import { segmentIsEffectivelyConfirmed } from '../services/segmentEffectiveStatu
 import { getProjectXliffExportCapabilities } from '../services/xliff/projectXliffDetect';
 import { supportsOriginalFormatExport } from '../services/catInterop/originalFormatExport';
 import {
+  DEFAULT_BILINGUAL_EXPORT_FONT,
+  DEFAULT_BILINGUAL_INTERLEAVED_ORDER,
   DEFAULT_MONOLINGUAL_EXPORT_FONT,
-  MONOLINGUAL_EXPORT_FONT_OPTIONS,
+  clampPptxFontScale,
+  DEFAULT_PPTX_FONT_SCALE,
+  getOriginalFormatKind,
+  inferDefaultOriginalDocxMode,
+  resolvePrimaryOriginalFormatKind,
+  supportsDocxBilingualExport,
+  type BilingualExportFontPair,
+  type BilingualInterleavedOrder,
   type MonolingualExportFont,
+  type OriginalDocxExportMode,
 } from '../services/catInterop/originalFormatExportTypes';
 import { canFormatPreservingExport } from '../services/catInterop/sourceBlobStore';
+import { ExportOptionsModal, type ExportOptions } from './ExportOptionsModal';
 import type { SettingsPanelId } from '../pages/Settings';
 
 function formatDataSize(bytes: number): string {
@@ -174,16 +185,6 @@ function openFavoriteInBrowser(raw: string) {
   }
 }
 
-interface ExportOptions {
-  format: 'excel' | 'tmx' | 'sdlxliff' | 'mqxliff' | 'sdlrpx' | 'original';
-  onlyConfirmed: boolean;
-  exportType?: 'all' | 'unlockedSource' | 'unlockedSourceTarget' | 'untranslated' | 'confirmed';
-  exportScope?: 'currentFile' | 'project';
-  sourceTargetOnly?: boolean;
-  /** 单语原文格式导出字体（.docx / .html） */
-  exportFont?: MonolingualExportFont;
-}
-
 interface LayoutProps {
   children: React.ReactNode;
   activePage: string;
@@ -244,8 +245,7 @@ export const Layout: React.FC<LayoutProps> = ({
   const [showExportOptions, setShowExportOptions] = useState(false);
   const xliffExport = getProjectXliffExportCapabilities(currentProject);
   const hasTradosPackage = xliffExport.hasTradosPackage;
-  const sdlxliffFileCount = xliffExport.sdlxliffFileCount;
-  const mqxliffFileCount = xliffExport.mqxliffFileCount;
+  const hasMemoqPackage = xliffExport.hasMemoqPackage;
   const hasSdlxliffExport = xliffExport.hasSdlxliff;
   const hasMqxliffExport = xliffExport.hasMqxliff;
 
@@ -257,14 +257,11 @@ export const Layout: React.FC<LayoutProps> = ({
     exportScope: 'currentFile' as 'currentFile' | 'project',
     sourceTargetOnly: true,
     exportFont: DEFAULT_MONOLINGUAL_EXPORT_FONT as MonolingualExportFont,
+    originalDocxMode: 'interleaved' as OriginalDocxExportMode,
+    bilingualExportFont: DEFAULT_BILINGUAL_EXPORT_FONT as BilingualExportFontPair,
+    bilingualInterleavedOrder: DEFAULT_BILINGUAL_INTERLEAVED_ORDER as BilingualInterleavedOrder,
+    pptxFontScale: DEFAULT_PPTX_FONT_SCALE,
   });
-
-  const isInteropExport =
-    exportOptions.format === 'sdlxliff' ||
-    exportOptions.format === 'mqxliff' ||
-    exportOptions.format === 'sdlrpx';
-
-  const isOriginalFormatExport = exportOptions.format === 'original';
 
   const activeFileForExport =
     currentProject?.files.find((f) => f.id === activeFileId) ?? currentProject?.files[0];
@@ -276,24 +273,81 @@ export const Layout: React.FC<LayoutProps> = ({
         ? [activeFileForExport]
         : [];
 
+  const docxFilesInScope = originalFormatFilesInScope.filter((f) => supportsDocxBilingualExport(f.name));
+
   const canOriginalFormatExport = originalFormatFilesInScope.some((f) =>
     canFormatPreservingExport(f)
   );
-  const showOriginalFormatExportOption = canOriginalFormatExport && !cloud;
+  const showOriginalFormatExportOption =
+    cloud ? docxFilesInScope.length > 0 : originalFormatFilesInScope.length > 0;
   const showOriginalFormatCloudHint =
-    cloud && originalFormatFilesInScope.length > 0;
+    cloud && originalFormatFilesInScope.length > 0 && docxFilesInScope.length === 0;
+  const showDocxBilingualSubOptions = docxFilesInScope.length > 0;
+  const canMonolingualOriginalExport = !cloud && canOriginalFormatExport;
+  const primaryOriginalFormatKind = resolvePrimaryOriginalFormatKind(originalFormatFilesInScope);
+  const hasPptxInExportScope = originalFormatFilesInScope.some(
+    (f) => getOriginalFormatKind(f.name) === 'pptx'
+  );
 
   const openExportOptions = () => {
     setExportOptions((prev) => {
       const next = { ...prev };
       if (hasTradosPackage) next.format = 'sdlrpx';
+      else if (hasMemoqPackage) next.format = 'mqxlz';
       else if (hasSdlxliffExport) next.format = 'sdlxliff';
       else if (hasMqxliffExport) next.format = 'mqxliff';
       else next.format = 'excel';
-      if (cloud && next.format === 'original') next.format = 'excel';
+
+      const scopeFile =
+        next.exportScope === 'project'
+          ? currentProject?.files.find((f) => supportsDocxBilingualExport(f.name))
+          : activeFileForExport && supportsDocxBilingualExport(activeFileForExport.name)
+            ? activeFileForExport
+            : activeFileForExport;
+      if (scopeFile && supportsDocxBilingualExport(scopeFile.name)) {
+        next.originalDocxMode = inferDefaultOriginalDocxMode(scopeFile);
+      } else {
+        next.originalDocxMode = 'monolingual';
+      }
+      if (cloud && next.originalDocxMode === 'monolingual' && scopeFile && supportsDocxBilingualExport(scopeFile.name)) {
+        next.originalDocxMode = 'interleaved';
+      }
+
       return next;
     });
     setShowExportOptions(true);
+  };
+
+  const handleExportConfirm = () => {
+    if (!onExportFile) return;
+    const opts = { ...exportOptions };
+    if (opts.format === 'original') {
+      opts.exportType = 'all';
+      opts.onlyConfirmed = false;
+    }
+    if (opts.format === 'tmx') {
+      opts.exportType = 'confirmed';
+      opts.onlyConfirmed = false;
+    }
+    if (opts.format === 'original' && !showDocxBilingualSubOptions) {
+      opts.originalDocxMode = 'monolingual';
+    }
+    if (
+      opts.format === 'original' &&
+      cloud &&
+      (opts.originalDocxMode === 'monolingual' || !showDocxBilingualSubOptions)
+    ) {
+      opts.originalDocxMode = 'interleaved';
+    }
+    if (
+      opts.format === 'original' &&
+      opts.originalDocxMode === 'monolingual' &&
+      hasPptxInExportScope
+    ) {
+      opts.pptxFontScale = clampPptxFontScale(opts.pptxFontScale ?? DEFAULT_PPTX_FONT_SCALE);
+    }
+    onExportFile(opts);
+    setShowExportOptions(false);
   };
 
   const navItems = [
@@ -522,282 +576,15 @@ export const Layout: React.FC<LayoutProps> = ({
                                 
                                 {/* Export Button */}
                                 <span className="h-3 w-px bg-slate-300 mx-2"></span>
-                                <div className="relative">
-                                    <button 
-                                        onClick={openExportOptions}
-                                        disabled={!onExportFile}
-                                        className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 text-slate-700 hover:bg-slate-200 rounded-md text-xs font-semibold transition-colors border border-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
-                                        title="导出文件"
-                                    >
-                                        <Icons.Download className="w-4 h-4" />
-                                        导出
-                                        <Icons.ChevronDown className="w-3 h-3 text-slate-500" />
-                                    </button>
-                                    
-                                    {/* Export Options Dialog */}
-                                    {showExportOptions && (
-                                        <div className="absolute right-0 top-full mt-1 w-72 bg-white rounded-xl shadow-xl border border-slate-200 p-3 z-50 animate-in fade-in slide-in-from-top-1">
-                                            <h4 className="text-xs font-bold text-slate-900 uppercase mb-3">导出选项</h4>
-
-                                            {/* Export Scope Selection */}
-                                            <div className="mb-3">
-                                                <label className="block text-xs font-medium text-slate-700 mb-1">导出范围</label>
-                                                <div className="space-y-1">
-                                                    <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer hover:bg-slate-50 p-1.5 rounded">
-                                                        <input
-                                                            type="radio"
-                                                            name="exportScope"
-                                                            value="currentFile"
-                                                            checked={exportOptions.exportScope === 'currentFile'}
-                                                            onChange={(e) => setExportOptions(prev => ({ ...prev, exportScope: e.target.value as 'currentFile' | 'project' }))}
-                                                            className="w-3 h-3 text-blue-600"
-                                                        />
-                                                        <span>当前文件</span>
-                                                    </label>
-                                                    <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer hover:bg-slate-50 p-1.5 rounded">
-                                                        <input
-                                                            type="radio"
-                                                            name="exportScope"
-                                                            value="project"
-                                                            checked={exportOptions.exportScope === 'project'}
-                                                            onChange={(e) => setExportOptions(prev => ({ ...prev, exportScope: e.target.value as 'currentFile' | 'project' }))}
-                                                            className="w-3 h-3 text-blue-600"
-                                                        />
-                                                        <span>整个项目（合并所有拆分文件）</span>
-                                                    </label>
-                                                </div>
-                                            </div>
-
-                                            {/* Export Type Selection */}
-                                            <div className="mb-3">
-                                                <label className="block text-xs font-medium text-slate-700 mb-1">导出内容</label>
-                                                <div className="space-y-1">
-                                                    <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer hover:bg-slate-50 p-1.5 rounded">
-                                                        <input
-                                                            type="radio"
-                                                            name="exportType"
-                                                            value="all"
-                                                            checked={exportOptions.exportType === 'all'}
-                                                            onChange={(e) => setExportOptions(prev => ({ ...prev, exportType: e.target.value as 'all' | 'unlockedSource' | 'unlockedSourceTarget', onlyConfirmed: false }))}
-                                                            className="w-3 h-3 text-blue-600"
-                                                        />
-                                                        <span>全部句段</span>
-                                                    </label>
-                                                    <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer hover:bg-slate-50 p-1.5 rounded">
-                                                        <input
-                                                            type="radio"
-                                                            name="exportType"
-                                                            value="unlockedSource"
-                                                            checked={exportOptions.exportType === 'unlockedSource'}
-                                                            onChange={(e) => setExportOptions(prev => ({ ...prev, exportType: e.target.value as 'all' | 'unlockedSource' | 'unlockedSourceTarget', onlyConfirmed: false }))}
-                                                            className="w-3 h-3 text-blue-600"
-                                                        />
-                                                        <span>未锁定原文</span>
-                                                    </label>
-                                                    <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer hover:bg-slate-50 p-1.5 rounded">
-                                                        <input
-                                                            type="radio"
-                                                            name="exportType"
-                                                            value="unlockedSourceTarget"
-                                                            checked={exportOptions.exportType === 'unlockedSourceTarget'}
-                                                            onChange={(e) => setExportOptions(prev => ({ ...prev, exportType: e.target.value as 'all' | 'unlockedSource' | 'unlockedSourceTarget' | 'untranslated', onlyConfirmed: false }))}
-                                                            className="w-3 h-3 text-blue-600"
-                                                        />
-                                                        <span>未锁定原文和译文</span>
-                                                    </label>
-                                                    <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer hover:bg-slate-50 p-1.5 rounded">
-                                                        <input
-                                                            type="radio"
-                                                            name="exportType"
-                                                            value="untranslated"
-                                                            checked={exportOptions.exportType === 'untranslated'}
-                                                            onChange={(e) => setExportOptions(prev => ({ ...prev, exportType: e.target.value as 'all' | 'unlockedSource' | 'unlockedSourceTarget' | 'untranslated' | 'confirmed', onlyConfirmed: false }))}
-                                                            className="w-3 h-3 text-blue-600"
-                                                        />
-                                                        <span>未翻译且未锁定句段</span>
-                                                    </label>
-                                                    <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer hover:bg-slate-50 p-1.5 rounded">
-                                                        <input
-                                                            type="radio"
-                                                            name="exportType"
-                                                            value="confirmed"
-                                                            checked={exportOptions.exportType === 'confirmed'}
-                                                            onChange={(e) => setExportOptions(prev => ({ ...prev, exportType: e.target.value as 'all' | 'unlockedSource' | 'unlockedSourceTarget' | 'untranslated' | 'confirmed', onlyConfirmed: false }))}
-                                                            className="w-3 h-3 text-blue-600"
-                                                        />
-                                                        <span>已确认句段原文和译文</span>
-                                                    </label>
-                                                </div>
-                                            </div>
-
-                                            {/* Only Confirmed Option - Only visible when exportType is 'all' */}
-                                            {exportOptions.exportType === 'all' && (
-                                                <div className="mb-3">
-                                                    <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer hover:bg-slate-50 p-1.5 rounded">
-                                                        <input
-                                                            type="checkbox"
-                                                            checked={exportOptions.onlyConfirmed}
-                                                            onChange={(e) => setExportOptions(prev => ({ ...prev, onlyConfirmed: e.target.checked }))}
-                                                            className="w-3 h-3 text-blue-600"
-                                                        />
-                                                        <span>仅导出已确认句段</span>
-                                                    </label>
-                                                </div>
-                                            )}
-
-                                            {/* Format Selection */}
-                                            <div className="mb-4">
-                                                <label className="block text-xs font-medium text-slate-700 mb-1">导出格式</label>
-                                                <div className="space-y-1">
-                                                    <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer hover:bg-slate-50 p-1.5 rounded">
-                                                        <input
-                                                            type="radio"
-                                                            name="exportFormat"
-                                                            value="excel"
-                                                            checked={exportOptions.format === 'excel'}
-                                                            onChange={(e) => setExportOptions(prev => ({ ...prev, format: e.target.value as ExportOptions['format'] }))}
-                                                            className="w-3 h-3 text-blue-600"
-                                                        />
-                                                        <span>Excel 文件 (.xlsx)</span>
-                                                    </label>
-                                                    <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer hover:bg-slate-50 p-1.5 rounded">
-                                                        <input
-                                                            type="radio"
-                                                            name="exportFormat"
-                                                            value="tmx"
-                                                            checked={exportOptions.format === 'tmx'}
-                                                            onChange={(e) => setExportOptions(prev => ({ ...prev, format: e.target.value as ExportOptions['format'] }))}
-                                                            className="w-3 h-3 text-blue-600"
-                                                        />
-                                                        <span>TMX 文件 (.tmx)</span>
-                                                    </label>
-                                                    {showOriginalFormatExportOption && (
-                                                      <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer hover:bg-slate-50 p-1.5 rounded">
-                                                        <input
-                                                          type="radio"
-                                                          name="exportFormat"
-                                                          value="original"
-                                                          checked={exportOptions.format === 'original'}
-                                                          onChange={() => setExportOptions(prev => ({ ...prev, format: 'original' }))}
-                                                          className="w-3 h-3 text-blue-600"
-                                                        />
-                                                        <span>原文格式（单语）</span>
-                                                      </label>
-                                                    )}
-                                                    {showOriginalFormatCloudHint && (
-                                                      <p className="text-[11px] text-slate-500 leading-relaxed pl-1">
-                                                        原文格式（单语）需在本地版导出（保留 Word 版式与字体）。云端请使用 Excel / TMX，或下载本地版后导出 DOCX。
-                                                      </p>
-                                                    )}
-                                                    {!cloud && originalFormatFilesInScope.length > 0 && !canOriginalFormatExport && (
-                                                      <p className="text-[11px] text-amber-700 leading-relaxed pl-1">
-                                                        当前文件尚无原文件备份，请重新导入文档后再使用保真导出。
-                                                      </p>
-                                                    )}
-                                                    {hasSdlxliffExport && (
-                                                      <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer hover:bg-slate-50 p-1.5 rounded">
-                                                        <input type="radio" name="exportFormat" value="sdlxliff" checked={exportOptions.format === 'sdlxliff'} onChange={() => setExportOptions(prev => ({ ...prev, format: 'sdlxliff' }))} className="w-3 h-3 text-blue-600" />
-                                                        <span>SDLXLIFF 双语文件 (.sdlxliff)</span>
-                                                      </label>
-                                                    )}
-                                                    {hasMqxliffExport && (
-                                                      <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer hover:bg-slate-50 p-1.5 rounded">
-                                                        <input type="radio" name="exportFormat" value="mqxliff" checked={exportOptions.format === 'mqxliff'} onChange={() => setExportOptions(prev => ({ ...prev, format: 'mqxliff' }))} className="w-3 h-3 text-blue-600" />
-                                                        <span>MQXLIFF 双语文件 (.mqxliff)</span>
-                                                      </label>
-                                                    )}
-                                                    {hasTradosPackage && (
-                                                      <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer hover:bg-slate-50 p-1.5 rounded">
-                                                        <input type="radio" name="exportFormat" value="sdlrpx" checked={exportOptions.format === 'sdlrpx'} onChange={() => setExportOptions(prev => ({ ...prev, format: 'sdlrpx' }))} className="w-3 h-3 text-blue-600" />
-                                                        <span>Trados 回传包 (.sdlrpx)</span>
-                                                      </label>
-                                                    )}
-                                                </div>
-                                                {isInteropExport && (
-                                                  <p className="mt-2 text-[11px] text-slate-500 leading-relaxed">
-                                                    {exportOptions.format === 'sdlrpx'
-                                                      ? '将包内全部 SDLXLIFF 写回译文后打包，供 Trados「导入返回包」。'
-                                                      : exportOptions.format === 'sdlxliff'
-                                                        ? '按句段 ID 写回 SDLXLIFF，保留内联标签。'
-                                                        : '按句段顺序写回 MQXLIFF。'}
-                                                    {exportOptions.format !== 'sdlrpx' && (
-                                                      <span className="block mt-1">导出范围选「整个项目」时将依次下载各双语文件。</span>
-                                                    )}
-                                                  </p>
-                                                )}
-                                            </div>
-
-                                            {isOriginalFormatExport && (
-                                              <div className="mb-4">
-                                                <label className="block text-xs font-medium text-slate-700 mb-1">导出字体</label>
-                                                <div className="space-y-1">
-                                                  {MONOLINGUAL_EXPORT_FONT_OPTIONS.map((opt) => (
-                                                    <label
-                                                      key={opt.id}
-                                                      className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer hover:bg-slate-50 p-1.5 rounded"
-                                                    >
-                                                      <input
-                                                        type="radio"
-                                                        name="exportFont"
-                                                        value={opt.id}
-                                                        checked={exportOptions.exportFont === opt.id}
-                                                        onChange={() =>
-                                                          setExportOptions((prev) => ({
-                                                            ...prev,
-                                                            exportFont: opt.id,
-                                                          }))
-                                                        }
-                                                        className="w-3 h-3 text-blue-600"
-                                                      />
-                                                      <span style={{ fontFamily: opt.previewFamily }}>{opt.label}</span>
-                                                    </label>
-                                                  ))}
-                                                </div>
-                                                <p className="mt-2 text-[11px] text-slate-500 leading-relaxed">
-                                                  将统一应用于导出文件中的译文文字（Word / HTML）。纯文本 .txt 不受字体设置影响。
-                                                </p>
-                                              </div>
-                                            )}
-
-                                            {/* Column Selection */}
-                                            {!isInteropExport && !isOriginalFormatExport && (
-                                            <div className="mb-4">
-                                                <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer hover:bg-slate-50 p-1.5 rounded">
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={exportOptions.sourceTargetOnly}
-                                                        onChange={(e) => setExportOptions(prev => ({ ...prev, sourceTargetOnly: e.target.checked }))}
-                                                        className="w-3 h-3 text-blue-600"
-                                                    />
-                                                    <span>仅导出原文和译文列（不含附加信息）</span>
-                                                </label>
-                                            </div>
-                                            )}
-
-                                            {/* Action Buttons */}
-                                            <div className="flex gap-2">
-                                                <button
-                                                    onClick={() => setShowExportOptions(false)}
-                                                    className="flex-1 px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded transition-colors"
-                                                >
-                                                    取消
-                                                </button>
-                                                <button
-                                                    onClick={() => {
-                                                        // 调用导出函数，并传递选项
-                                                        if (onExportFile) {
-                                                            onExportFile(exportOptions);
-                                                        }
-                                                        setShowExportOptions(false);
-                                                    }}
-                                                    className="flex-1 px-3 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded transition-colors"
-                                                >
-                                                    确认导出
-                                                </button>
-                                            </div>
-                                        </div>
-                                    )}
-                                </div>
+                                <button
+                                    onClick={openExportOptions}
+                                    disabled={!onExportFile}
+                                    className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 text-slate-700 hover:bg-slate-200 rounded-md text-xs font-semibold transition-colors border border-slate-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                                    title="导出文件"
+                                >
+                                    <Icons.Download className="w-4 h-4" />
+                                    导出
+                                </button>
                             </div>
                         </>
                     )}
@@ -914,6 +701,29 @@ export const Layout: React.FC<LayoutProps> = ({
           {children}
         </div>
       </main>
+
+      <ExportOptionsModal
+        open={showExportOptions}
+        onClose={() => setShowExportOptions(false)}
+        options={exportOptions}
+        onChange={(patch) => setExportOptions((prev) => ({ ...prev, ...patch }))}
+        onConfirm={handleExportConfirm}
+        flags={{
+          cloud,
+          showOriginalFormatExportOption,
+          showOriginalFormatCloudHint,
+          showDocxBilingualSubOptions,
+          canMonolingualOriginalExport,
+          canOriginalFormatExport,
+          hasSdlxliffExport,
+          hasMqxliffExport,
+          hasTradosPackage,
+          hasMemoqPackage,
+          originalFormatFilesInScopeCount: originalFormatFilesInScope.length,
+          primaryOriginalFormatKind,
+          hasPptxInExportScope,
+        }}
+      />
     </div>
   );
 };

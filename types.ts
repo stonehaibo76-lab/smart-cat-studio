@@ -61,6 +61,14 @@ export interface TradosPackageMeta {
   xliffPaths: string[];
 }
 
+export interface MemoQPackageMeta {
+  packageBlobId: string;
+  originalFileName: string;
+  sourceLang: string;
+  targetLang: string;
+  mqxliffPaths: string[];
+}
+
 /** Inline run style for DOCX WYSIWYG / format-preserving merge (tag id → style). */
 export interface InlineRunStyle {
   id: string;
@@ -107,8 +115,12 @@ export interface ProjectFile {
     interchangeFormat?: InterchangeFormat;
     /** 文件级 XLIFF 元数据（每文件一个 blob） */
     interchangeMeta?: Omit<XliffInterchangeMeta, 'xliffSegmentId' | 'mqIndex'>;
-    /** 原文文件 blob（docx/txt/html），用于格式保真 merge 导出 */
+    /** 原文文件 blob（docx/pptx/txt/html），用于格式保真 merge 导出 */
     sourceBlobId?: string;
+    /** DOCX 导入模式（用于导出面板默认对照样式） */
+    docxImportMode?: 'bilingual' | 'monolingual';
+    /** 双语 DOCX 导入时的版式：双列表格或交替段落 */
+    docxBilingualLayout?: 'table' | 'interleaved';
 }
 
 export interface Project {
@@ -148,6 +160,9 @@ export interface Project {
 
   /** Trados SDLPPX/SDLRPX 包元数据 */
   tradosPackage?: TradosPackageMeta;
+
+  /** memoQ MQXLZ 包元数据 */
+  memoqPackage?: MemoQPackageMeta;
 }
 
 /** 单条正则表达式翻译：原文为正则，译文支持 $1…、$0、$&、$$；有「类别」时可被规则词典 {类别名} 引用 */

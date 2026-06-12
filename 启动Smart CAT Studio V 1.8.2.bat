@@ -1,6 +1,6 @@
 @echo off
 setlocal EnableExtensions
-title Smart-CAT Studio V1.8.0
+title Smart-CAT Studio V1.8.2
 REM Must cd first when launched from Explorer (ASCII-only to avoid cmd.exe UTF-8 parse errors)
 
 pushd "%~dp0" 2>nul
@@ -38,25 +38,27 @@ if "%NEED_INSTALL%"=="1" (
 REM Canonical folder path without trailing "\" (avoids broken quoting for START /D)
 for %%I in ("%~dp0.") do set "APP_DIR=%%~fI"
 
-echo Smart-CAT Studio V1.8.0
+echo Smart-CAT Studio V1.8.2
 echo.
-echo [1/3] Starting Okapi sidecar ^(format extract, port 8090^) ...
+echo [1/3] Starting Okapi sidecar ^(DOCX/PPTX/HTML/TXT, port 8090^) ...
 call "%APP_DIR%\scripts\start-okapi-sidecar.cmd" silent
 if errorlevel 1 (
-    echo [WARN] Okapi sidecar failed to start. Install Python 3.10+ or run scripts\start-okapi-sidecar.cmd manually.
-) else (
-    echo       Okapi window opened ^(or already running^).
+    echo [ERROR] Okapi sidecar failed to start. Install Python 3.10+ or run scripts\start-okapi-sidecar.cmd manually.
+    pause
+    popd
+    exit /b 1
 )
+echo       Okapi window opened with PPTX support.
 
 timeout /t 2 /nobreak >nul
 
 echo [2/3] Starting local DB server ...
-start "SmartCAT-DB V1.8.0" /D "%APP_DIR%" cmd /k npm run server
+start "SmartCAT-DB V1.8.2" /D "%APP_DIR%" cmd /k npm run server
 
 timeout /t 3 /nobreak >nul
 
 echo [3/3] Starting frontend ^(browser opens when Vite is ready^) ...
-start "SmartCAT-Web V1.8.0" /D "%APP_DIR%" cmd /k npm run dev -- --open
+start "SmartCAT-Web V1.8.2" /D "%APP_DIR%" cmd /k npm run dev -- --open
 
 echo.
 echo Three windows should open: Okapi, DB server, Web UI.

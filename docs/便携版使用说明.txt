@@ -1,4 +1,4 @@
-Smart-CAT Studio V1.8.0 — 便携版使用说明
+Smart-CAT Studio V1.8.1 — 便携版使用说明
 ========================================
 
 一、快速开始
@@ -12,7 +12,7 @@ Smart-CAT Studio V1.8.0 — 便携版使用说明
 二、包含功能
 ------------
 - 本地 SQLite 数据库（项目、记忆库、术语库、孪生译员等）
-- Okapi 侧车：DOCX / HTML / TXT 等格式导入与原文格式导出
+- Okapi 侧车：DOCX / PPTX / HTML / TXT 等格式导入与原文格式导出
 - MT 参考引擎：编辑器内多引擎机器翻译对照（需联网）
 - 孪生译员：个性化翻译建议（需配置 AI API Key）
 
@@ -50,7 +50,7 @@ MT 参考侧车使用 translators 库（GPL-3.0），详见 docs\MT-GPL-NOTICE.t
 七、发版前验证清单（维护者）
 ----------------------------
 [ ] 在未安装 Node / Python 的干净 Windows 10/11 解压 zip，双击 bat 可打开编辑器
-[ ] 新建项目并导入 DOCX（Okapi 8090）
+[ ] 新建项目并导入 DOCX 或 PPTX（Okapi 8090）
 [ ] 编辑器 MT 参考面板可查询（8770）
 [ ] 孪生译员创建档案并生成建议（已配置 API Key）
 [ ] 重启后 data\smartcat-local.db 数据仍在
@@ -65,4 +65,4 @@ MT 参考侧车使用 translators 库（GPL-3.0），详见 docs\MT-GPL-NOTICE.t
 打包前请关闭「启动Smart CAT Studio」开发窗口（npm run dev / server）。
 若必须重装依赖：npm run build:portable -- --fresh
 
-输出：release\Smart-CAT-Studio-1.8.0-portable-win64.zip
+输出：release\Smart-CAT-Studio-1.8.1-portable-win64.zip

@@ -2,6 +2,7 @@ import type { InterchangeFormat, Project, ProjectFile } from '../../types';
 
 export interface ProjectXliffExportCapabilities {
   hasTradosPackage: boolean;
+  hasMemoqPackage: boolean;
   hasSdlxliff: boolean;
   hasMqxliff: boolean;
   sdlxliffFileCount: number;
@@ -23,6 +24,10 @@ export function inferFileInterchangeFormat(file: ProjectFile): InterchangeFormat
     return 'sdlxliff';
   }
 
+  if (file.interchangeMeta?.packagePath && file.interchangeMeta?.format) {
+    return file.interchangeMeta.format;
+  }
+
   if (file.interchangeMeta?.packagePath || file.interchangeMeta?.originalBlobId) {
     return 'sdlxliff';
   }
@@ -40,6 +45,7 @@ export function getProjectXliffExportCapabilities(
   if (!project) {
     return {
       hasTradosPackage: false,
+      hasMemoqPackage: false,
       hasSdlxliff: false,
       hasMqxliff: false,
       sdlxliffFileCount: 0,
@@ -48,6 +54,7 @@ export function getProjectXliffExportCapabilities(
   }
 
   const hasTradosPackage = Boolean(project.tradosPackage?.packageBlobId);
+  const hasMemoqPackage = Boolean(project.memoqPackage?.packageBlobId);
   let sdlxliffFileCount = 0;
   let mqxliffFileCount = 0;
 
@@ -59,8 +66,9 @@ export function getProjectXliffExportCapabilities(
 
   return {
     hasTradosPackage,
+    hasMemoqPackage,
     hasSdlxliff: sdlxliffFileCount > 0 || hasTradosPackage,
-    hasMqxliff: mqxliffFileCount > 0,
+    hasMqxliff: mqxliffFileCount > 0 || hasMemoqPackage,
     sdlxliffFileCount,
     mqxliffFileCount,
   };

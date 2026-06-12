@@ -2,7 +2,7 @@
  * Smart-CAT Studio portable launcher — starts Okapi, MT sidecar, and Node API+UI.
  * Run via: runtime/node/node.exe scripts/packaging/smartcat-launcher.mjs
  */
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -49,6 +49,84 @@ async function waitForHealth(url, timeoutMs = 60_000) {
     await new Promise((r) => setTimeout(r, 500));
   }
   return false;
+}
+
+/** Stop stale Okapi sidecar so the new build (with PPTX routes) can bind 8090. */
+function killPortListeners(port) {
+  if (process.platform !== 'win32') return;
+  try {
+    const result = spawnSync('netstat', ['-ano'], { encoding: 'utf8', windowsHide: true });
+    const pids = new Set();
+    for (const line of (result.stdout || '').split(/\r?\n/)) {
+      if (!line.includes(`:${port}`) || !/LISTENING/i.test(line)) continue;
+      const parts = line.trim().split(/\s+/);
+      const pid = parts[parts.length - 1];
+      if (/^\d+$/.test(pid) && pid !== '0') pids.add(pid);
+    }
+    for (const pid of pids) {
+      spawnSync('taskkill', ['/PID', pid, '/F', '/T'], { stdio: 'ignore', windowsHide: true });
+    }
+    if (pids.size > 0) {
+      log(`[Okapi] 已停止占用 ${port} 端口的旧侧车（${pids.size} 个进程）。`);
+    }
+  } catch {
+    /* ignore */
+  }
+}
+
+async function waitForOkapiHealth(timeoutMs = 60_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch('http://127.0.0.1:8090/health', { signal: AbortSignal.timeout(2000) });
+      if (!res.ok) continue;
+      const data = await res.json().catch(() => ({}));
+      if (data.ok && data.pptxSupported === true) return true;
+    } catch {
+      /* retry */
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return false;
+}
+
+function ensureOkapiPythonDeps(okapiDir) {
+  const reqFile = path.join(okapiDir, 'requirements.txt');
+  const pptxHandler = path.join(okapiDir, 'pptx_handler.py');
+  if (!fs.existsSync(reqFile)) return;
+  if (!fs.existsSync(pptxHandler)) {
+    log('[ERROR] 未找到 pptx_handler.py，PPTX 导入/导出不可用。');
+    process.exit(1);
+  }
+
+  const probeScript =
+    'import fastapi, uvicorn, pptx; from pptx_handler import extract_pptx';
+  const probe = spawnSync(pythonExe, ['-c', probeScript], {
+    cwd: okapiDir,
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  if (probe.status === 0) return;
+
+  log('[Okapi] 安装/更新侧车依赖（DOCX/PPTX/HTML/TXT）…');
+  const install = spawnSync(
+    pythonExe,
+    ['-m', 'pip', 'install', '-r', reqFile, '--no-warn-script-location'],
+    { cwd: okapiDir, stdio: 'inherit', windowsHide: true }
+  );
+  if (install.status !== 0) {
+    log('[ERROR] Okapi 依赖安装失败，PPTX 导入/导出不可用。');
+    process.exit(1);
+  }
+  const recheck = spawnSync(pythonExe, ['-c', probeScript], {
+    cwd: okapiDir,
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  if (recheck.status !== 0) {
+    log('[ERROR] PPTX 模块校验失败（python-pptx / pptx_handler）。');
+    process.exit(1);
+  }
 }
 
 function ensureDataDir() {
@@ -124,7 +202,11 @@ async function main() {
   const okapiDir = path.join(APP_ROOT, 'scripts', 'okapi-sidecar');
   const mtDir = path.join(APP_ROOT, 'scripts', 'translators-server');
 
-  log('[1/4] 启动 Okapi sidecar (8090)…');
+  ensureOkapiPythonDeps(okapiDir);
+  killPortListeners(8090);
+  await new Promise((r) => setTimeout(r, 1000));
+
+  log('[1/4] 启动 Okapi sidecar (8090, DOCX/PPTX/HTML/TXT)…');
   spawnService(
     'Okapi',
     pythonExe,
@@ -150,8 +232,16 @@ async function main() {
     },
   });
 
+  process.stdout.write('等待 Okapi 就绪（含 PPTX 支持）…');
+  const okapiReady = await waitForOkapiHealth();
+  log(okapiReady ? ' OK' : ' 超时');
+  if (!okapiReady) {
+    log('[ERROR] Okapi 侧车在 60 秒内未就绪或未报告 pptxSupported。请关闭旧 SmartCAT-Okapi 窗口后重试。');
+    cleanup();
+    process.exit(1);
+  }
+
   const checks = [
-    ['Okapi', 'http://127.0.0.1:8090/health'],
     ['MT 参考', 'http://127.0.0.1:8770/health'],
     ['主服务', 'http://127.0.0.1:58741/api/health'],
   ];

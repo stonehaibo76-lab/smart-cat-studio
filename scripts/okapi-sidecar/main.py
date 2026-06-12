@@ -38,7 +38,7 @@ PORT = int(os.environ.get("OKAPI_PORT", "8090"))
 def build_download_name(original_name: str) -> str:
     out_name = original_name or "merged.docx"
     lower = out_name.lower()
-    if not lower.endswith((".docx", ".txt", ".html", ".htm")):
+    if not lower.endswith((".docx", ".txt", ".html", ".htm", ".pptx")):
         out_name += ".docx"
     if "." in out_name:
         base, ext = out_name.rsplit(".", 1)
@@ -1099,11 +1099,18 @@ def extract_txt(data: bytes) -> List[dict]:
 
 @app.get("/health")
 def health():
+    try:
+        from pptx_handler import extract_pptx  # noqa: F401
+
+        pptx_supported = True
+    except ImportError:
+        pptx_supported = False
     return {
         "ok": True,
         "version": "0.2.0-smartcat",
         "okapiJarConfigured": bool(OKAPI_JAR and os.path.isfile(OKAPI_JAR)),
         "mergeSupported": True,
+        "pptxSupported": pptx_supported,
     }
 
 
@@ -1121,6 +1128,10 @@ async def extract(file: UploadFile = File(...)):
             segments = extract_html(data)
         elif name.endswith(".txt"):
             segments = extract_txt(data)
+        elif name.endswith(".pptx"):
+            from pptx_handler import extract_pptx
+
+            segments = extract_pptx(data)
         else:
             return JSONResponse(
                 {
@@ -1141,6 +1152,7 @@ async def merge(
     file: UploadFile = File(...),
     segments_json: str = Form(...),
     export_font: Optional[str] = Form(None),
+    pptx_font_scale: Optional[str] = Form(None),
 ):
     name = (file.filename or "file").lower()
     data = await file.read()
@@ -1157,6 +1169,17 @@ async def merge(
     if font_key and font_key not in MONOLINGUAL_EXPORT_FONT_MAP:
         return JSONResponse({"ok": False, "error": f"unsupported export_font: {font_key}"}, status_code=400)
 
+    pptx_scale = None
+    if (pptx_font_scale or "").strip():
+        from pptx_handler import normalize_pptx_font_scale
+
+        pptx_scale = normalize_pptx_font_scale(pptx_font_scale)
+        if pptx_scale is None:
+            return JSONResponse(
+                {"ok": False, "error": "pptx_font_scale must be between 0.1 and 1"},
+                status_code=400,
+            )
+
     try:
         if name.endswith(".docx"):
             merged = merge_docx(data, units, font_key)
@@ -1167,6 +1190,11 @@ async def merge(
         elif name.endswith((".html", ".htm")):
             merged = merge_html(data, units, font_key)
             mime = "text/html; charset=utf-8"
+        elif name.endswith(".pptx"):
+            from pptx_handler import merge_pptx
+
+            merged = merge_pptx(data, units, font_key, pptx_scale)
+            mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
         else:
             return JSONResponse({"ok": False, "error": f"merge not supported for {name}"}, status_code=400)
 

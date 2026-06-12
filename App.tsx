@@ -33,6 +33,7 @@ import {
 } from './services/xliff/xliffImport';
 import {
   exportSdlrpxPackage,
+  exportMqxlzPackage,
   exportXliffFilesFromProject,
   downloadBytes,
   type XliffFileExportFormat,
@@ -42,7 +43,21 @@ import {
   exportOriginalFormatProjectZip,
   supportsOriginalFormatExport,
 } from './services/catInterop/originalFormatExport';
-import type { MonolingualExportFont } from './services/catInterop/originalFormatExportTypes';
+import {
+  exportBilingualDocxFile,
+  exportBilingualDocxProjectZip,
+} from './services/catInterop/bilingualDocxExport';
+import type {
+  BilingualExportFontPair,
+  BilingualInterleavedOrder,
+  MonolingualExportFont,
+  OriginalDocxExportMode,
+} from './services/catInterop/originalFormatExportTypes';
+import {
+  clampPptxFontScale,
+  DEFAULT_PPTX_FONT_SCALE,
+  supportsDocxBilingualExport,
+} from './services/catInterop/originalFormatExportTypes';
 import { DEFAULT_OKAPI_SETTINGS, type OkapiSettings } from './types';
 import { normalizeProjectsXliffMeta } from './services/xliff/projectXliffDetect';
 import { shouldAutoLockSegmentAtImport } from './services/segmentAutoLock';
@@ -730,7 +745,9 @@ const App: React.FC = () => {
     isExcel: boolean = false,
     excelSegments?: Array<{ source: string; target?: string; okapiTuId?: string; inlineRunMeta?: import('./types').InlineRunStyle[] }>,
     xliffProject?: ParsedXliffProject,
-    sourceBlobId?: string
+    sourceBlobId?: string,
+    docxImportMode?: 'bilingual' | 'monolingual',
+    docxBilingualLayout?: 'table' | 'interleaved'
   ) => {
       setProjects(prev => prev.map(p => {
           if (p.id === projectId) {
@@ -755,6 +772,7 @@ const App: React.FC = () => {
                   sourceLang: xliffProject.sourceLang || p.sourceLang,
                   targetLang: xliffProject.targetLang || p.targetLang,
                   tradosPackage: xliffProject.tradosPackage ?? p.tradosPackage,
+                  memoqPackage: xliffProject.memoqPackage ?? p.memoqPackage,
                 };
               }
 
@@ -828,6 +846,8 @@ const App: React.FC = () => {
                   progress:
                       segs.length > 0 ? Math.round((newFileCompleted / segs.length) * 100) : 0,
                   sourceBlobId,
+                  docxImportMode,
+                  docxBilingualLayout,
               };
 
               const updatedFiles = [...p.files, newFile];
@@ -1002,6 +1022,30 @@ const App: React.FC = () => {
       } : tm));
   };
 
+  const handleMemoqQuickExport = async (
+    projectId: string,
+    kind: 'mqxliff' | 'mqxlz'
+  ) => {
+    const project = projects.find((p) => p.id === projectId);
+    if (!project) return;
+    try {
+      if (kind === 'mqxlz') {
+        const { bytes, fileName } = await exportMqxlzPackage(project);
+        downloadBytes(bytes, fileName, 'application/zip');
+        alert(`已导出 memoQ 回传包：${fileName}`);
+        return;
+      }
+      const names = await exportXliffFilesFromProject(project, 'mqxliff', 'project');
+      alert(
+        names.length === 1
+          ? `已导出 MQXLIFF：${names[0]}`
+          : `已导出 ${names.length} 个 MQXLIFF 文件`
+      );
+    } catch (e) {
+      alert(e instanceof Error ? e.message : '导出失败');
+    }
+  };
+
   const handleTradosQuickExport = async (
     projectId: string,
     kind: 'sdlxliff' | 'sdlrpx'
@@ -1028,12 +1072,16 @@ const App: React.FC = () => {
 
   // 导出当前文件功能
   const handleExportFile = async (options: {
-    format: 'excel' | 'tmx' | 'sdlxliff' | 'mqxliff' | 'sdlrpx' | 'original';
+    format: 'excel' | 'tmx' | 'sdlxliff' | 'mqxliff' | 'sdlrpx' | 'mqxlz' | 'original';
     onlyConfirmed: boolean;
     exportType?: 'all' | 'unlockedSource' | 'unlockedSourceTarget' | 'untranslated' | 'confirmed';
     exportScope?: 'currentFile' | 'project';
     sourceTargetOnly?: boolean;
     exportFont?: MonolingualExportFont;
+    originalDocxMode?: OriginalDocxExportMode;
+    bilingualExportFont?: BilingualExportFontPair;
+    bilingualInterleavedOrder?: BilingualInterleavedOrder;
+    pptxFontScale?: number;
   }) => {
     if (!activeProject) return;
 
@@ -1047,6 +1095,17 @@ const App: React.FC = () => {
         alert(`已导出 Trados 回传包：${fileName}\n请在 Trados Studio 中「导入返回包」完成交稿。`);
       } catch (e) {
         alert(e instanceof Error ? e.message : '导出 SDLRPX 失败');
+      }
+      return;
+    }
+
+    if (options.format === 'mqxlz') {
+      try {
+        const { bytes, fileName } = await exportMqxlzPackage(activeProject);
+        downloadBytes(bytes, fileName, 'application/zip');
+        alert(`已导出 memoQ 回传包：${fileName}\n请在 memoQ 中导入该包完成交稿。`);
+      } catch (e) {
+        alert(e instanceof Error ? e.message : '导出 MQXLZ 失败');
       }
       return;
     }
@@ -1096,11 +1155,70 @@ const App: React.FC = () => {
     };
 
     if (options.format === 'original') {
+      const originalDocxMode = options.originalDocxMode ?? 'monolingual';
+      const bilingualMode =
+        originalDocxMode === 'interleaved' || originalDocxMode === 'table'
+          ? originalDocxMode
+          : null;
+
+      if (bilingualMode) {
+        try {
+          const docxFilesToExport =
+            exportScope === 'project'
+              ? activeProject.files.filter((f) => supportsDocxBilingualExport(f.name))
+              : supportsDocxBilingualExport(activeFile.name)
+                ? [activeFile]
+                : [];
+
+          if (docxFilesToExport.length === 0) {
+            alert('当前范围没有可导出的 DOCX 文件。');
+            return;
+          }
+
+          const fontPair = options.bilingualExportFont ?? 'simsun-times-new-roman';
+          const interleavedOrder =
+            bilingualMode === 'interleaved'
+              ? (options.bilingualInterleavedOrder ?? 'source-first')
+              : 'source-first';
+
+          if (exportScope === 'project' && docxFilesToExport.length > 1) {
+            const map = new Map<string, Segment[]>();
+            for (const file of docxFilesToExport) {
+              map.set(file.id, filterSegments(file.segments));
+            }
+            const zipName = await exportBilingualDocxProjectZip(
+              docxFilesToExport,
+              map,
+              bilingualMode,
+              fontPair,
+              interleavedOrder
+            );
+            alert(`已导出 ${docxFilesToExport.length} 个双语 DOCX 文件：${zipName}`);
+            return;
+          }
+
+          const file = docxFilesToExport[0];
+          const outName = await exportBilingualDocxFile(
+            file,
+            filterSegments(file.segments),
+            bilingualMode,
+            fontPair,
+            interleavedOrder
+          );
+          const label = bilingualMode === 'table' ? '并列对照' : '段段对照';
+          alert(`已导出${label}双语 DOCX：${outName}`);
+        } catch (e) {
+          alert(e instanceof Error ? e.message : '导出双语 DOCX 失败');
+        }
+        return;
+      }
+
       if (isCloudDeployment()) {
-        alert('原文格式（单语）导出需在本地版完成（需 Okapi 侧车）。云端请使用 Excel / TMX 导出，或在本机运行 Smart CAT Studio 便携版后再导出 DOCX。');
+        alert('纯译文（保真）导出需在本地版完成（需 Okapi 侧车）。云端请使用段段/并列对照双语 DOCX，或 Excel / TMX 导出。');
         return;
       }
       const okapiSettings: OkapiSettings = DEFAULT_OKAPI_SETTINGS;
+      const pptxFontScale = clampPptxFontScale(options.pptxFontScale ?? DEFAULT_PPTX_FONT_SCALE);
       try {
         const filesToExport =
           exportScope === 'project'
@@ -1110,7 +1228,7 @@ const App: React.FC = () => {
               : [];
 
         if (filesToExport.length === 0) {
-          alert('当前文件不支持导出原文格式（仅 .docx / .txt / .html）。');
+          alert('当前文件不支持导出原文格式（仅 .docx / .pptx / .txt / .html）。');
           return;
         }
 
@@ -1123,7 +1241,8 @@ const App: React.FC = () => {
             filesToExport,
             map,
             okapiSettings,
-            options.exportFont
+            options.exportFont,
+            pptxFontScale
           );
           alert(`已导出 ${filesToExport.length} 个保真原文格式文件：${zipName}`);
           return;
@@ -1134,7 +1253,8 @@ const App: React.FC = () => {
           file,
           filterSegments(file.segments),
           okapiSettings,
-          options.exportFont
+          options.exportFont,
+          pptxFontScale
         );
         alert(`已导出保真原文格式：${outName}`);
       } catch (e) {
@@ -1425,6 +1545,7 @@ const App: React.FC = () => {
                 onUpdateProject={handleUpdateProject}
                 searchQuery={searchQuery}
                 onTradosQuickExport={handleTradosQuickExport}
+                onMemoqQuickExport={handleMemoqQuickExport}
             />
         );
       case 'editor':

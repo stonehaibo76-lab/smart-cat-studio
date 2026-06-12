@@ -1,6 +1,6 @@
 import { loadXliffBlob, saveXliffBlob } from '../xliff/xliffBlobStore';
 
-/** Reuses xliff_blobs storage for original source files (docx, html, txt). */
+/** Reuses xliff_blobs storage for original source files (docx, pptx, html, txt). */
 export function newSourceBlobId(): string {
   return `source-${crypto.randomUUID()}`;
 }
@@ -21,6 +21,7 @@ export function canFormatPreservingExport(file: { sourceBlobId?: string; name: s
   const lower = file.name.toLowerCase();
   return (
     lower.endsWith('.docx') ||
+    lower.endsWith('.pptx') ||
     lower.endsWith('.txt') ||
     lower.endsWith('.html') ||
     lower.endsWith('.htm')

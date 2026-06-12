@@ -573,6 +573,9 @@ app.post('/api/okapi/merge', maybeRequireAuth, maybeRequireWrite, express.json({
     form.append('segments_json', JSON.stringify(segments));
     const exportFont = String(body.exportFont || 'simsun').trim();
     form.append('export_font', exportFont);
+    if (body.pptxFontScale != null && body.pptxFontScale !== '') {
+      form.append('pptx_font_scale', String(body.pptxFontScale));
+    }
     const mergeRes = await fetch(`${upstream}/merge`, {
       method: 'POST',
       body: form,

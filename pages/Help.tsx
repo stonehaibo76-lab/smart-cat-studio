@@ -119,7 +119,7 @@ const OverviewSection = () => {
           <FeatureCard
             icon={Icons.File}
             title="多格式支持"
-            description="项目可导入 TXT、DOCX、Excel、SDLXLIFF、MQXLIFF、SDLPPX/SDLRPX；导出 Excel、TMX、原文格式（单语 .docx/.txt/.html），以及可回写 Trados/memoQ 的双语 XLIFF。"
+            description="项目可导入 TXT、DOCX、PPTX、Excel、SDLXLIFF、MQXLIFF、MQXLZ、SDLPPX/SDLRPX；导出 Excel、TMX、原文格式（纯译文 / 段段对照 / 并列对照 DOCX / PPTX），以及可回写 Trados/memoQ 的双语 XLIFF 或回传包。"
           />
           <FeatureCard
             icon={Icons.Brain}
@@ -208,6 +208,39 @@ const WhatsNewSection = () => {
       </p>
     </div>
 
+    <div className="bg-gradient-to-r from-teal-50 to-emerald-50 rounded-2xl p-6 border border-teal-200">
+      <div className="flex items-start gap-4">
+        <div className="p-3 bg-teal-100 text-teal-700 rounded-xl">
+          <Icons.Lightbulb className="w-6 h-6" />
+        </div>
+        <div>
+          <h3 className="text-lg font-bold text-slate-900 mb-3">V1.8.1 · 项目向导与 CAT 包</h3>
+          <ul className="space-y-2 text-slate-700 text-sm">
+            <li className="flex gap-2">
+              <Icons.Check className="w-4 h-4 text-teal-600 flex-shrink-0 mt-0.5" />
+              <span><strong className="text-slate-900">创建项目向导</strong>：四步流程（基本信息 → 导入文件 → 资源挂载 → 确认创建）；记忆库 / 术语库 / 辅助词典采用 Trados 风格表格，支持主库、参考库与新建库。</span>
+            </li>
+            <li className="flex gap-2">
+              <Icons.Check className="w-4 h-4 text-teal-600 flex-shrink-0 mt-0.5" />
+              <span><strong className="text-slate-900">CAT 包导入</strong>：支持 Trados 项目包（.sdlppx / .sdlrpx）、memoQ 包（.mqxlz）及 SDLXLIFF / MQXLIFF；导入时自动识别语言对，可批量上传多文件。</span>
+            </li>
+            <li className="flex gap-2">
+              <Icons.Check className="w-4 h-4 text-teal-600 flex-shrink-0 mt-0.5" />
+              <span><strong className="text-slate-900">PPTX 格式保留</strong>：通过 Okapi 侧车（8090）导入 / 导出 PowerPoint，保留字符级样式；原文格式导出写回 .pptx。</span>
+            </li>
+            <li className="flex gap-2">
+              <Icons.Check className="w-4 h-4 text-teal-600 flex-shrink-0 mt-0.5" />
+              <span><strong className="text-slate-900">XLIFF 回写增强</strong>：导出 MQXLZ 回传包时写回包内 MQXLIFF 并保留 skeleton.xml，便于 memoQ 交稿；Trados 包项目可在列表中识别类型。</span>
+            </li>
+            <li className="flex gap-2">
+              <Icons.Check className="w-4 h-4 text-teal-600 flex-shrink-0 mt-0.5" />
+              <span>本地开发请使用根目录 <code className="bg-white/80 px-1 rounded">启动Smart CAT Studio V 1.8.1.bat</code> 一并启动 Okapi、数据库与前端。</span>
+            </li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
     <div className="bg-gradient-to-r from-amber-50 to-orange-50 rounded-2xl p-6 border border-amber-200">
       <div className="flex items-start gap-4">
         <div className="p-3 bg-amber-100 text-amber-700 rounded-xl">
@@ -218,7 +251,7 @@ const WhatsNewSection = () => {
           <ul className="space-y-2 text-slate-700 text-sm">
             <li className="flex gap-2">
               <Icons.Check className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
-              <span><strong className="text-slate-900">原文格式（单语）导出</strong>：在原 DOCX / TXT / HTML 上写回译文，保留标题、表格、文本框及 run 级字符样式；多文件打包为 ZIP，文件名含导出时间戳。</span>
+              <span><strong className="text-slate-900">原文格式导出</strong>：纯译文在原 DOCX / PPTX / TXT / HTML 上写回译文并保留版式；DOCX 另支持段段对照、并列对照双语导出（仿云译客 iCAT），多文件打包为 ZIP。</span>
             </li>
             <li className="flex gap-2">
               <Icons.Check className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
@@ -234,7 +267,7 @@ const WhatsNewSection = () => {
             </li>
             <li className="flex gap-2">
               <Icons.Check className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
-              <span>导入时自动保存原文件副本；需 <strong className="text-slate-900">Okapi 侧车</strong>（8090）运行。使用根目录 <code className="bg-white/80 px-1 rounded">启动Smart CAT Studio V1.8.0.bat</code> 可一并启动。</span>
+              <span>导入时自动保存原文件副本；需 <strong className="text-slate-900">Okapi 侧车</strong>（8090）运行。</span>
             </li>
           </ul>
         </div>
@@ -245,11 +278,12 @@ const WhatsNewSection = () => {
       <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-sm md:col-span-2">
         <h3 className="text-xl font-bold text-slate-900 mb-4 flex items-center gap-2">
           <Icons.File className="w-5 h-5 text-indigo-600" />
-          DOCX 格式保留（{APP_DISPLAY_VERSION}）
+          DOCX 格式保留（自 V1.8.0 起）
         </h3>
         <ul className="space-y-2 text-slate-600 text-sm">
           <li>• 支持 run 级样式：加粗、斜体、下划线、删除线、字体颜色、高亮、上标、下标；段落级删除线等也会继承识别。</li>
-          <li>• 导出时选择「原文格式（单语）」；单文件直接下载，多文件打包为 <code className="bg-slate-50 px-1 rounded">项目原文格式导出_YYYYMMDD_HHmmss.zip</code>。</li>
+          <li>• 导出时选择「原文格式」→ 纯译文（保真）、段段对照或并列对照；双语 DOCX 可在浏览器直接生成，纯译文需 Okapi 侧车。</li>
+          <li>• 多文件打包为 <code className="bg-slate-50 px-1 rounded">项目原文格式导出_…</code> 或 <code className="bg-slate-50 px-1 rounded">项目双语导出_…</code> ZIP。</li>
           <li>• 若提示缺少原文件备份，请重新导入该 DOCX（导入时会自动保存原文件）。详细操作见「翻译编辑 → DOCX 格式保留」。</li>
         </ul>
       </div>
@@ -335,19 +369,19 @@ const QuickStartSection = () => (
       <StepCard
         step={1}
         title="创建翻译项目"
-        description="在项目管理页面点击'新建项目'按钮，填写项目名称、源语言和目标语言。"
+        description="在项目管理页面点击「新建项目」，按向导步骤填写：基本信息 → 导入文件 → 资源挂载 → 确认创建。"
         icon={Icons.Plus}
       />
       <StepCard
         step={2}
         title="导入翻译文件"
-        description="上传需要翻译的文件：TXT、DOCX、Excel（.xlsx / .xls）；Trados 的 .sdlxliff / .sdlppx / .sdlrpx；memoQ 的 .mqxliff。DOCX 导入时会保存原文件并提取 run 级格式；XLIFF 会保留句段 ID 以便回写；SDLXLIFF 在编辑器中以 <标签ID> 形式显示内联标记。"
+        description="在向导第 2 步上传需要翻译的文件：TXT、DOCX、PPTX、Excel（.xlsx / .xls）；Trados 的 .sdlxliff / .sdlppx / .sdlrpx；memoQ 的 .mqxliff / .mqxlz（压缩包，内含 MQXLIFF 与 skeleton.xml）。DOCX / PPTX 导入时会保存原文件并提取 run 级格式（PPTX 含演讲者备注，需 Okapi 侧车）；XLIFF 会保留句段 ID 以便回写；SDLXLIFF 在编辑器中以 <标签ID> 形式显示内联标记。"
         icon={Icons.Upload}
       />
       <StepCard
         step={3}
         title="配置语言资源"
-        description="选择或创建翻译记忆库和术语库，这些资源将帮助您提高翻译效率和一致性。"
+        description="在向导第 3 步选择或创建翻译记忆库和术语库，这些资源将帮助您提高翻译效率和一致性。"
         icon={Icons.Database}
       />
       <StepCard
@@ -359,7 +393,7 @@ const QuickStartSection = () => (
       <StepCard
         step={5}
         title="导出翻译结果"
-        description="翻译完成后可导出 Excel、TMX；XLIFF 项目可导出 SDLXLIFF / MQXLIFF 或 SDLRPX 回传包。DOCX / TXT / HTML 可选「原文格式（单语）」写回译文并保留版式（需 Okapi 侧车）。"
+        description="翻译完成后可导出 Excel、TMX；XLIFF 项目可导出 SDLXLIFF / MQXLIFF，或 Trados SDLRPX / memoQ MQXLZ 回传包。DOCX / PPTX / TXT / HTML 可选「原文格式」纯译文（保真）；DOCX 另支持段段对照、并列对照双语导出（仿云译客 iCAT）。"
         icon={Icons.Download}
       />
     </div>
@@ -398,26 +432,25 @@ const DashboardSection = () => (
           <Icons.Plus className="w-5 h-5 text-blue-500" />
           创建新项目
         </h3>
+        <p className="text-slate-600 mb-4">
+          点击「新建项目」后将打开分步向导，顶部步骤条显示当前进度；可使用「上一步 / 下一步」逐步填写，已完成步骤可点击回跳修改。
+        </p>
         <ol className="space-y-3 text-slate-600">
           <li className="flex gap-3">
             <span className="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-sm font-bold">1</span>
-            <span>点击页面右上角的"新建项目"按钮</span>
+            <span><strong className="text-slate-900">基本信息</strong>：填写项目名称，选择源语言和目标语言</span>
           </li>
           <li className="flex gap-3">
             <span className="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-sm font-bold">2</span>
-            <span>填写项目名称、选择源语言和目标语言</span>
+            <span><strong className="text-slate-900">导入文件</strong>：上传需要翻译的文件（支持多文件）；导入 XLIFF 时若语言与步骤 1 不同，将提示并以文件内语言为准</span>
           </li>
           <li className="flex gap-3">
             <span className="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-sm font-bold">3</span>
-            <span>上传需要翻译的文件（支持多文件）</span>
+            <span><strong className="text-slate-900">资源挂载</strong>：左侧切换「翻译记忆库 / 术语库 / 辅助词典」，表格中「更新/写入」设主库、「查库」勾选参考库；默认仅显示匹配项目语言对的资源</span>
           </li>
           <li className="flex gap-3">
             <span className="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-sm font-bold">4</span>
-            <span>选择或创建翻译记忆库和术语库</span>
-          </li>
-          <li className="flex gap-3">
-            <span className="flex-shrink-0 w-6 h-6 bg-blue-100 text-blue-600 rounded-full flex items-center justify-center text-sm font-bold">5</span>
-            <span>点击"创建项目"完成</span>
+            <span><strong className="text-slate-900">确认创建</strong>：核对项目摘要后点击「创建项目」完成</span>
           </li>
         </ol>
       </div>
@@ -568,7 +601,7 @@ const EditorSection = () => (
         <div className="space-y-4 text-slate-600 text-sm leading-relaxed">
           <p>
             从 <strong className="text-slate-900">V1.8.0</strong> 起，导入 DOCX 时会解析 Word 的 run 级样式（加粗、斜体、下划线、删除线、颜色、高亮、上标、下标等），
-            原文列以近似 Word 的方式显示；导入同时会在本地保存原文件，供后续「原文格式（单语）」导出写回。
+            原文列以近似 Word 的方式显示；导入同时会在本地保存原文件，供后续「原文格式」纯译文（保真）导出写回。
           </p>
           <div>
             <strong className="text-slate-900">复制格式到译文</strong>
@@ -581,9 +614,9 @@ const EditorSection = () => (
           <div>
             <strong className="text-slate-900">导出</strong>
             <ul className="mt-2 space-y-1">
-              <li>• 点击右上角「导出」→ 选择「原文格式（单语）」；单文件直接下载，多文件打包为 ZIP。</li>
-              <li>• 需 Okapi 侧车（8090）运行；推荐双击 <code className="bg-white/80 px-1 rounded">启动Smart CAT Studio V1.8.0.bat</code> 一并启动。</li>
-              <li>• 若选项不可用或提示缺少备份，请重新导入该 DOCX。</li>
+              <li>• 点击右上角「导出」→「原文格式」→ 选择纯译文（保真）、段段对照或并列对照；段段对照可选「原文在上/译文在上」。</li>
+              <li>• 纯译文需在本地版运行 Okapi 侧车（8090）；段段/并列对照双语 DOCX 可在浏览器直接下载。</li>
+              <li>• 若纯译文不可用，请重新导入 DOCX（导入时会保存原文件备份）。</li>
             </ul>
           </div>
           <div>
@@ -1716,7 +1749,7 @@ const FAQSection = () => {
   const faqs = [
     {
       question: `${APP_DISPLAY_VERSION} 有哪些新内容？`,
-      answer: `${APP_DISPLAY_VERSION} 重点新增 DOCX 格式保留：导入时提取 run 级样式并在编辑器 WYSIWYG 显示；译文可通过 Ctrl+点击原文复制格式；导出可选「原文格式（单语）」写回原 DOCX/TXT/HTML。详见「更新说明」与「翻译编辑 → DOCX 格式保留」。`
+      answer: `${APP_DISPLAY_VERSION} 重点新增创建项目向导（四步流程、Trados 风格资源挂载）、Trados / memoQ 项目包与 XLIFF 导入、PPTX 格式保留，以及 MQXLZ 回传包导出。DOCX 格式保留与双语导出自 V1.8.0 延续可用。详见「更新说明」。`
     },
     {
       question: "如何开始使用 Smart-CAT Studio？",
@@ -1724,7 +1757,7 @@ const FAQSection = () => {
     },
     {
       question: "支持哪些文件格式？",
-      answer: "新建项目时支持导入 TXT、DOCX 以及 Excel（.xlsx / .xls）：表格至少两列时按「原文 / 译文」拆成句段，单列则每行作为原文句段。DOCX 会保存原文件并提取字符级格式。导出支持 Excel (.xlsx)、TMX、原文格式（单语 .docx/.txt/.html），以及 SDLXLIFF / MQXLIFF / SDLRPX 等 CAT 回写格式。"
+      answer: "新建项目时支持导入 TXT、DOCX、PPTX 以及 Excel（.xlsx / .xls）：表格至少两列时按「原文 / 译文」拆成句段，单列则每行作为原文句段。DOCX / PPTX 会保存原文件并提取字符级格式（PPTX 需 Okapi 侧车）。导出支持 Excel (.xlsx)、TMX、原文格式（纯译文 DOCX/PPTX/TXT/HTML，及 DOCX 段段/并列对照），以及 SDLXLIFF / MQXLIFF / SDLRPX / MQXLZ 等 CAT 回写格式。"
     },
     {
       question: "翻译记忆库和术语库有什么区别？",
@@ -1762,7 +1795,7 @@ const FAQSection = () => {
     },
     {
       question: "如何导出翻译结果？",
-      answer: "在翻译编辑页面点击右上角「导出」：可选 Excel、TMX、原文格式（单语）、SDLXLIFF / MQXLIFF / SDLRPX 等（视项目文件类型而定）。原文格式（单语）在原文件上写回译文并保留 Word 版式，需 Okapi 侧车运行且导入时已保存原文件。可勾选「仅导出已确认句段」。"
+      answer: "在翻译编辑页面点击右上角「导出」：可选 Excel、TMX、原文格式（纯译文 DOCX/PPTX/TXT/HTML，及 DOCX 段段/并列对照）、SDLXLIFF / MQXLIFF / SDLRPX / MQXLZ 等（视项目文件类型而定）。MQXLZ 回传包会将包内 MQXLIFF 写回译文并保留 skeleton.xml，供 memoQ 导入交稿。纯译文在原文件上写回并保留版式，需 Okapi 侧车；双语对照 DOCX 可在浏览器直接生成。可勾选「仅导出已确认句段」。"
     },
     {
       question: "能否跨项目复用记忆库和术语库？",

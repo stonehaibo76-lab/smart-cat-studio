@@ -4,6 +4,7 @@ import { shouldAutoLockSegmentAtImport } from '../segmentAutoLock';
 import { parseSdlxliffXml } from './sdlxliffParser';
 import { parseMqxliffXml } from './mqxliffHandler';
 import { parseTradosPackageBuffer } from './tradosPackageHandler';
+import { parseMemoqPackageBuffer } from './memoqPackageHandler';
 import { newXliffBlobId, saveXliffBlob, bytesToUtf8 } from './xliffBlobStore';
 
 export interface ParsedXliffSegment {
@@ -36,6 +37,7 @@ export interface ParsedXliffProject {
   targetLang: string;
   files: ParsedXliffFile[];
   tradosPackage?: import('../../types').TradosPackageMeta;
+  memoqPackage?: import('../../types').MemoQPackageMeta;
   extraBlobIds?: string[];
 }
 
@@ -178,6 +180,55 @@ export async function parseTradosPackage(file: File): Promise<ParsedXliffProject
   };
 }
 
+export async function parseMemoqPackage(file: File): Promise<ParsedXliffProject> {
+  const buf = await file.arrayBuffer();
+  const packageBlobId = newXliffBlobId();
+  await saveXliffBlob(packageBlobId, buf);
+
+  const pkg = await parseMemoqPackageBuffer(buf, file.name, packageBlobId);
+  const extraBlobIds: string[] = [packageBlobId];
+  const files: ParsedXliffFile[] = [];
+
+  for (const pf of pkg.files) {
+    const fileBlobId = newXliffBlobId();
+    await saveXliffBlob(fileBlobId, pf.originalBytes);
+    extraBlobIds.push(fileBlobId);
+
+    const segments: ParsedXliffSegment[] = pf.segments.map((s, i) => ({
+      source: s.source,
+      target: s.target,
+      xliffSegmentId: s.id,
+      mqIndex: i,
+      status: mqStatusToSegment(s.status),
+      matchType:
+        s.matchPercent && s.matchPercent >= 100
+          ? MatchType.Exact
+          : s.matchPercent && s.matchPercent >= 70
+            ? MatchType.Fuzzy
+            : MatchType.None,
+      matchScore: s.matchPercent ?? undefined,
+    }));
+
+    files.push({
+      fileName: pf.name,
+      format: 'mqxliff',
+      sourceLang: pf.sourceLang,
+      targetLang: pf.targetLang,
+      originalBlobId: fileBlobId,
+      packagePath: pf.path,
+      segments,
+    });
+  }
+
+  return {
+    sourceLang: pkg.meta.sourceLang,
+    targetLang: pkg.meta.targetLang,
+    files,
+    memoqPackage: pkg.meta,
+    extraBlobIds,
+  };
+}
+
 export function buildSegmentsFromParsed(
   parsedSegments: ParsedXliffSegment[],
   fileIdx: number,
@@ -240,9 +291,12 @@ export function buildProjectFileFromParsed(
   };
 }
 
-export function detectXliffKind(fileName: string): 'sdlxliff' | 'mqxliff' | 'package' | null {
+export function detectXliffKind(
+  fileName: string
+): 'sdlxliff' | 'mqxliff' | 'trados-package' | 'memoq-package' | null {
   const lower = fileName.toLowerCase();
-  if (lower.endsWith('.sdlppx') || lower.endsWith('.sdlrpx')) return 'package';
+  if (lower.endsWith('.sdlppx') || lower.endsWith('.sdlrpx')) return 'trados-package';
+  if (lower.endsWith('.mqxlz')) return 'memoq-package';
   if (lower.endsWith('.sdlxliff')) return 'sdlxliff';
   if (lower.endsWith('.mqxliff')) return 'mqxliff';
   if (lower.endsWith('.xlf') || lower.endsWith('.xliff')) return 'sdlxliff';

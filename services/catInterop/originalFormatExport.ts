@@ -7,6 +7,7 @@ import {
   supportsOriginalFormatExport,
   segmentTextForOriginalExport,
   type MonolingualExportFont,
+  clampPptxFontScale,
 } from './originalFormatExportTypes';
 
 export {
@@ -28,7 +29,8 @@ export async function exportOriginalFormatFile(
   file: ProjectFile,
   segments: Segment[],
   okapiSettings?: OkapiSettings,
-  exportFont?: MonolingualExportFont
+  exportFont?: MonolingualExportFont,
+  pptxFontScale?: number
 ): Promise<string> {
   if (!supportsOriginalFormatExport(file.name)) {
     throw new Error(`不支持导出原文格式：${file.name}`);
@@ -45,13 +47,11 @@ export async function exportOriginalFormatFile(
     throw new Error('无法读取原始文件，请确认本地 DB 服务已启动并重试。');
   }
 
-  const merged = await okapiMergeFile(
-    file.name,
-    blob,
-    segmentsToMergePayload(segments),
-    okapiSettings,
-    exportFont
-  );
+  const isPptx = getOriginalFormatKind(file.name) === 'pptx';
+  const merged = await okapiMergeFile(file.name, blob, segmentsToMergePayload(segments), okapiSettings, {
+    exportFont,
+    pptxFontScale: isPptx && pptxFontScale != null ? clampPptxFontScale(pptxFontScale) : undefined,
+  });
   downloadBytes(merged.bytes, merged.fileName, merged.mime);
   return merged.fileName;
 }
@@ -66,7 +66,8 @@ export async function exportOriginalFormatProjectZip(
   files: ProjectFile[],
   segmentsByFileId: Map<string, Segment[]>,
   okapiSettings?: OkapiSettings,
-  exportFont?: MonolingualExportFont
+  exportFont?: MonolingualExportFont,
+  pptxFontScale?: number
 ): Promise<string> {
   const JSZip = (await import('jszip')).default;
   const zip = new JSZip();
@@ -81,13 +82,11 @@ export async function exportOriginalFormatProjectZip(
     const blob = await loadSourceBlob(file.sourceBlobId!);
     if (!blob) continue;
 
-    const merged = await okapiMergeFile(
-      file.name,
-      blob,
-      segmentsToMergePayload(segments),
-      okapiSettings,
-      exportFont
-    );
+    const isPptx = getOriginalFormatKind(file.name) === 'pptx';
+    const merged = await okapiMergeFile(file.name, blob, segmentsToMergePayload(segments), okapiSettings, {
+      exportFont,
+      pptxFontScale: isPptx && pptxFontScale != null ? clampPptxFontScale(pptxFontScale) : undefined,
+    });
     zip.file(merged.fileName, merged.bytes);
     count += 1;
   }

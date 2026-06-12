@@ -148,25 +148,34 @@ export type ParseBilingualDocxOptions = {
   allowAlternatingParas?: boolean;
 };
 
+export type DocxBilingualLayout = 'table' | 'interleaved';
+
+export type ParseBilingualDocxResult = {
+  segments: BilingualDocxSegment[];
+  layout: DocxBilingualLayout;
+};
+
 /** Detect Trados-style bilingual DOCX (strict 2-column table or alternating paragraphs). */
 export async function parseBilingualDocx(
   arrayBuffer: ArrayBuffer,
   options: ParseBilingualDocxOptions = {}
-): Promise<BilingualDocxSegment[]> {
+): Promise<ParseBilingualDocxResult | null> {
   const zip = await JSZip.loadAsync(arrayBuffer);
   const docXml = await zip.file('word/document.xml')?.async('string');
-  if (!docXml) return [];
+  if (!docXml) return null;
 
   const layout = analyzeTwoColumnTableLayout(docXml);
   if (layout.rowCount >= 1 && (layout.allTwoColumn || layout.hasBilingualHeader)) {
     const fromTable = extractTablePairs(docXml);
-    if (isCleanBilingualSegments(fromTable)) return fromTable;
+    if (isCleanBilingualSegments(fromTable)) {
+      return { segments: fromTable, layout: 'table' };
+    }
   }
 
-  if (!options.allowAlternatingParas) return [];
+  if (!options.allowAlternatingParas) return null;
 
   const taggedParas = extractTaggedParagraphsFromDocXml(docXml);
-  if (taggedParas.length < 2) return [];
+  if (taggedParas.length < 2) return null;
 
   const segments: BilingualDocxSegment[] = [];
   for (let i = 0; i + 1 < taggedParas.length; i += 2) {
@@ -178,7 +187,7 @@ export async function parseBilingualDocx(
       inlineRunMeta: taggedParas[i].inlineRunMeta,
     });
   }
-  return isCleanBilingualSegments(segments) ? segments : [];
+  return isCleanBilingualSegments(segments) ? { segments, layout: 'interleaved' } : null;
 }
 
 /** Monolingual DOCX: one segment per paragraph (fallback mammoth plain text). */
@@ -221,13 +230,21 @@ export function isLikelyBilingualDocxFileName(name: string): boolean {
 export async function parseDocxForImport(
   arrayBuffer: ArrayBuffer,
   fileName: string
-): Promise<{ segments: BilingualDocxSegment[]; mode: 'bilingual' | 'monolingual' }> {
+): Promise<{
+  segments: BilingualDocxSegment[];
+  mode: 'bilingual' | 'monolingual';
+  docxBilingualLayout?: DocxBilingualLayout;
+}> {
   const nameHint = isLikelyBilingualDocxFileName(fileName);
   const bilingual = await parseBilingualDocx(arrayBuffer, {
     allowAlternatingParas: nameHint,
   });
-  if (bilingual.length > 0 && isCleanBilingualSegments(bilingual)) {
-    return { segments: bilingual, mode: 'bilingual' };
+  if (bilingual && bilingual.segments.length > 0) {
+    return {
+      segments: bilingual.segments,
+      mode: 'bilingual',
+      docxBilingualLayout: bilingual.layout,
+    };
   }
   const monolingual = await parseMonolingualDocx(arrayBuffer);
   return { segments: monolingual, mode: 'monolingual' };
