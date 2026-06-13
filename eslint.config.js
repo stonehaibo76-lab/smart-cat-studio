@@ -7,7 +7,13 @@ export default tseslint.config(
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    ignores: ['dist/**', 'node_modules/**', 'server/**', 'scripts/*.mjs', 'scripts/test-twin-translator-browser.js'],
+    ignores: [
+      'dist/**',
+      'node_modules/**',
+      'server/**',
+      'scripts/**/*.mjs',
+      'scripts/test-twin-translator-browser.js',
+    ],
   },
   {
     files: ['**/*.{ts,tsx}'],
