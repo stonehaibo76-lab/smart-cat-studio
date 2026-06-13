@@ -58,8 +58,42 @@ export type ExportOptionsModalProps = {
   flags: ExportOptionsModalFlags;
 };
 
+const labelClass = 'mb-1.5 block text-sm font-medium text-slate-700';
+
 const selectClass =
-  'w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20';
+  'w-full rounded-lg border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-700 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20';
+
+const hintClass = 'mt-1.5 text-xs leading-relaxed text-slate-500';
+
+const chipRadioClass = (active: boolean, disabled?: boolean) =>
+  `inline-flex cursor-pointer items-center gap-2 rounded-lg border px-3 py-1.5 text-sm transition-colors ${
+    active
+      ? 'border-blue-500 bg-blue-50 text-blue-700'
+      : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300 hover:bg-slate-50'
+  } ${disabled ? 'cursor-not-allowed opacity-50' : ''}`;
+
+function originalFormatStyleHint(
+  mode: OriginalDocxExportMode | undefined,
+  kind: OriginalFormatKind | 'mixed' | null,
+  canMonolingual: boolean,
+  canOriginal: boolean
+): string | null {
+  if (mode === 'monolingual' && canMonolingual) {
+    return monolingualExportStyleHint(kind);
+  }
+  if (mode === 'interleaved') {
+    return canOriginal
+      ? '在原 DOCX 上保留目录、表格、文本框等版式，每段原文与译文相邻排列；字符格式同步保留。'
+      : '从句段生成新 DOCX（无原文件备份时不保留段落版式）；未译句段译文留空。';
+  }
+  if (mode === 'table') {
+    return '生成新的两列表格对照稿，不保留原文档中的表格/目录结构。';
+  }
+  if (!canMonolingual) {
+    return '纯译文（保真）需导入时已保存原文件备份；双语对照可直接从句段生成。';
+  }
+  return null;
+}
 
 const EXPORT_SCOPE_OPTIONS = [
   { value: 'currentFile' as const, label: '当前文件' },
@@ -191,22 +225,22 @@ export const ExportOptionsModal: React.FC<ExportOptionsModalProps> = ({
         if (e.target === e.currentTarget) onClose();
       }}
     >
-      <div className="flex max-h-[85vh] w-full max-w-md flex-col overflow-hidden rounded-2xl bg-white shadow-2xl animate-in zoom-in-95 duration-200">
-        <div className="flex shrink-0 items-center justify-between border-b border-slate-200 px-5 py-4">
-          <h2 className="text-base font-bold text-slate-900">导出</h2>
+      <div className="flex max-h-[85vh] w-full max-w-xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl animate-in zoom-in-95 duration-200">
+        <div className="flex shrink-0 items-center justify-between border-b border-slate-200 px-6 py-5">
+          <h2 className="text-lg font-bold text-slate-900">导出</h2>
           <button
             type="button"
             onClick={onClose}
-            className="rounded-lg p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
+            className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-600"
             aria-label="关闭"
           >
-            <Icons.X className="h-5 w-5" />
+            <Icons.X className="h-6 w-6" />
           </button>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
-          <div className="mb-3">
-            <label htmlFor="exportScope" className="mb-1 block text-xs font-medium text-slate-700">
+        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
+          <div className="mb-4">
+            <label htmlFor="exportScope" className={labelClass}>
               导出范围
             </label>
             <select
@@ -225,8 +259,8 @@ export const ExportOptionsModal: React.FC<ExportOptionsModalProps> = ({
             </select>
           </div>
 
-          <div className="mb-3">
-            <label htmlFor="exportType" className="mb-1 block text-xs font-medium text-slate-700">
+          <div className="mb-4">
+            <label htmlFor="exportType" className={labelClass}>
               导出内容
             </label>
             <select
@@ -252,25 +286,25 @@ export const ExportOptionsModal: React.FC<ExportOptionsModalProps> = ({
               ))}
             </select>
             {isOriginalFormatExport && (
-              <p className="mt-1 text-[11px] leading-relaxed text-slate-500">
+              <p className={hintClass}>
                 原文格式导出固定为全部句段。
               </p>
             )}
             {isTmxExport && (
-              <p className="mt-1 text-[11px] leading-relaxed text-slate-500">
+              <p className={hintClass}>
                 TMX 导出固定为已确认句段原文和译文。
               </p>
             )}
           </div>
 
           {options.exportType === 'all' && !isExportTypeLocked && (
-            <div className="mb-3">
-              <label className="flex cursor-pointer items-center gap-2 rounded p-1.5 text-xs text-slate-600 hover:bg-slate-50">
+            <div className="mb-4">
+              <label className="flex cursor-pointer items-center gap-2.5 rounded-lg p-2 text-sm text-slate-600 hover:bg-slate-50">
                 <input
                   type="checkbox"
                   checked={options.onlyConfirmed}
                   onChange={(e) => onChange({ onlyConfirmed: e.target.checked })}
-                  className="h-3 w-3 text-blue-600"
+                  className="h-4 w-4 text-blue-600"
                 />
                 <span>仅导出已确认句段</span>
               </label>
@@ -278,7 +312,7 @@ export const ExportOptionsModal: React.FC<ExportOptionsModalProps> = ({
           )}
 
           <div className="mb-4">
-            <label htmlFor="exportFormat" className="mb-1 block text-xs font-medium text-slate-700">
+            <label htmlFor="exportFormat" className={labelClass}>
               导出格式
             </label>
             <select
@@ -303,23 +337,23 @@ export const ExportOptionsModal: React.FC<ExportOptionsModalProps> = ({
             </select>
 
             {showOriginalFormatCloudHint && (
-              <p className="mt-2 text-[11px] leading-relaxed text-amber-700">
+              <p className="mt-2 text-xs leading-relaxed text-amber-700">
                 当前文件尚无原文件备份，请重新导入文档后再使用保真导出；段段/并列对照双语 DOCX 仍可从句段生成。
               </p>
             )}
             {originalFormatFilesInScopeCount > 0 && !canOriginalFormatExport && showDocxBilingualSubOptions && (
-              <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
+              <p className="mt-2 text-xs leading-relaxed text-slate-500">
                 纯译文（保真）需导入时已保存原文件备份；段段/并列对照可直接从句段生成。
               </p>
             )}
             {originalFormatFilesInScopeCount > 0 && !canOriginalFormatExport && !showDocxBilingualSubOptions && (
-              <p className="mt-2 text-[11px] leading-relaxed text-amber-700">
+              <p className="mt-2 text-xs leading-relaxed text-amber-700">
                 当前文件尚无原文件备份，请重新导入文档后再使用保真导出。
               </p>
             )}
 
             {isInteropExport && (
-              <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
+              <p className="mt-2 text-xs leading-relaxed text-slate-500">
                 {options.format === 'sdlrpx'
                   ? '将包内全部 SDLXLIFF 写回译文后打包，供 Trados「导入返回包」。'
                   : options.format === 'mqxlz'
@@ -337,82 +371,46 @@ export const ExportOptionsModal: React.FC<ExportOptionsModalProps> = ({
           {isOriginalFormatExport && (
             <div className="mb-4 space-y-3">
               <div>
-                <label className="mb-1 block text-xs font-medium text-slate-700">原文格式样式</label>
-                <div className="ml-1 space-y-1 border-l-2 border-slate-100 pl-1">
-                  <label
-                      className={`flex items-center gap-2 rounded p-1.5 text-xs ${
-                        canMonolingualOriginalExport
-                          ? 'cursor-pointer text-slate-600 hover:bg-slate-50'
-                          : 'cursor-not-allowed text-slate-400'
-                      }`}
-                    >
-                      <input
-                        type="radio"
-                        name="originalDocxMode"
-                        value="monolingual"
-                        checked={options.originalDocxMode === 'monolingual'}
-                        disabled={!canMonolingualOriginalExport}
-                        onChange={() => onChange({ originalDocxMode: 'monolingual' })}
-                        className="h-3 w-3 text-blue-600 disabled:opacity-50"
-                      />
-                      <span>{monolingualExportStyleLabel(primaryOriginalFormatKind)}</span>
-                    </label>
+                <label htmlFor="originalDocxMode" className={labelClass}>
+                  原文格式样式
+                </label>
+                <select
+                  id="originalDocxMode"
+                  className={selectClass}
+                  value={options.originalDocxMode ?? 'monolingual'}
+                  onChange={(e) =>
+                    onChange({ originalDocxMode: e.target.value as OriginalDocxExportMode })
+                  }
+                >
+                  <option value="monolingual" disabled={!canMonolingualOriginalExport}>
+                    {monolingualExportStyleLabel(primaryOriginalFormatKind)}
+                  </option>
                   {showDocxBilingualSubOptions && (
                     <>
-                      <label className="flex cursor-pointer items-center gap-2 rounded p-1.5 text-xs text-slate-600 hover:bg-slate-50">
-                        <input
-                          type="radio"
-                          name="originalDocxMode"
-                          value="interleaved"
-                          checked={options.originalDocxMode === 'interleaved'}
-                          onChange={() => onChange({ originalDocxMode: 'interleaved' })}
-                          className="h-3 w-3 text-blue-600"
-                        />
-                        <span>段段对照（双语 DOCX）</span>
-                      </label>
-                      <label className="flex cursor-pointer items-center gap-2 rounded p-1.5 text-xs text-slate-600 hover:bg-slate-50">
-                        <input
-                          type="radio"
-                          name="originalDocxMode"
-                          value="table"
-                          checked={options.originalDocxMode === 'table'}
-                          onChange={() => onChange({ originalDocxMode: 'table' })}
-                          className="h-3 w-3 text-blue-600"
-                        />
-                        <span>并列对照（双语 DOCX）</span>
-                      </label>
+                      <option value="interleaved">段段对照（双语 DOCX）</option>
+                      <option value="table">并列对照（双语 DOCX）</option>
                     </>
                   )}
-                </div>
-                {!canMonolingualOriginalExport && showDocxBilingualSubOptions && (
-                  <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
-                    纯译文（保真）需导入时已保存原文件备份；双语对照可直接从句段生成。
-                  </p>
-                )}
-                {options.originalDocxMode === 'monolingual' && canMonolingualOriginalExport && (
-                  <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
-                    {monolingualExportStyleHint(primaryOriginalFormatKind)}
-                  </p>
-                )}
-                {isBilingualDocxExport && (
-                  <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
-                    {options.originalDocxMode === 'interleaved' && canOriginalFormatExport
-                      ? '在原 DOCX 上保留目录、表格、文本框等版式，每段原文与译文相邻排列；字符格式同步保留。'
-                      : options.originalDocxMode === 'table'
-                        ? '生成新的两列表格对照稿，不保留原文档中的表格/目录结构。'
-                        : '从句段生成新 DOCX（无原文件备份时不保留段落版式）；未译句段译文留空。'}
-                  </p>
-                )}
+                </select>
+                {(() => {
+                  const hint = originalFormatStyleHint(
+                    options.originalDocxMode,
+                    primaryOriginalFormatKind,
+                    canMonolingualOriginalExport,
+                    canOriginalFormatExport
+                  );
+                  return hint ? <p className={hintClass}>{hint}</p> : null;
+                })()}
               </div>
 
               {options.originalDocxMode === 'monolingual' && canMonolingualOriginalExport && (
                 <div>
-                  <label className="mb-1 block text-xs font-medium text-slate-700">导出字体</label>
-                  <div className="space-y-1">
+                  <label className={labelClass}>导出字体</label>
+                  <div className="flex flex-wrap gap-2">
                     {MONOLINGUAL_EXPORT_FONT_OPTIONS.map((opt) => (
                       <label
                         key={opt.id}
-                        className="flex cursor-pointer items-center gap-2 rounded p-1.5 text-xs text-slate-600 hover:bg-slate-50"
+                        className={chipRadioClass(options.exportFont === opt.id)}
                       >
                         <input
                           type="radio"
@@ -420,25 +418,23 @@ export const ExportOptionsModal: React.FC<ExportOptionsModalProps> = ({
                           value={opt.id}
                           checked={options.exportFont === opt.id}
                           onChange={() => onChange({ exportFont: opt.id })}
-                          className="h-3 w-3 text-blue-600"
+                          className="sr-only"
                         />
                         <span style={{ fontFamily: opt.previewFamily }}>{opt.label}</span>
                       </label>
                     ))}
                   </div>
-                  <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
-                    {monolingualExportFontHint(primaryOriginalFormatKind)}
-                  </p>
+                  <p className={hintClass}>{monolingualExportFontHint(primaryOriginalFormatKind)}</p>
                 </div>
               )}
 
               {showPptxFontScale && (
                 <div>
-                  <div className="mb-1 flex items-center justify-between">
-                    <label htmlFor="pptxFontScale" className="text-xs font-medium text-slate-700">
+                  <div className="mb-1.5 flex items-center justify-between">
+                    <label htmlFor="pptxFontScale" className="text-sm font-medium text-slate-700">
                       译文字号缩放比例
                     </label>
-                    <span className="text-xs font-semibold tabular-nums text-blue-600">
+                    <span className="text-sm font-semibold tabular-nums text-blue-600">
                       {Math.round(clampPptxFontScale(options.pptxFontScale ?? DEFAULT_PPTX_FONT_SCALE) * 100)}%
                     </span>
                   </div>
@@ -448,17 +444,17 @@ export const ExportOptionsModal: React.FC<ExportOptionsModalProps> = ({
                     min={PPTX_FONT_SCALE_MIN}
                     max={PPTX_FONT_SCALE_MAX}
                     step={PPTX_FONT_SCALE_STEP}
-                    className="h-2 w-full cursor-pointer accent-blue-600"
+                    className="h-2.5 w-full cursor-pointer accent-blue-600"
                     value={clampPptxFontScale(options.pptxFontScale ?? DEFAULT_PPTX_FONT_SCALE)}
                     onChange={(e) =>
                       onChange({ pptxFontScale: clampPptxFontScale(Number(e.target.value)) })
                     }
                   />
-                  <div className="mt-1 flex justify-between text-[10px] text-slate-400">
+                  <div className="mt-1 flex justify-between text-xs text-slate-400">
                     <span>{PPTX_FONT_SCALE_MIN}</span>
                     <span>{PPTX_FONT_SCALE_MAX}</span>
                   </div>
-                  <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
+                  <p className={hintClass}>
                     相对原文字号的缩放比例（例如 0.7 表示 70%）。
                     {primaryOriginalFormatKind === 'mixed' && ' 仅应用于 PPTX 文件。'}
                   </p>
@@ -466,50 +462,52 @@ export const ExportOptionsModal: React.FC<ExportOptionsModalProps> = ({
               )}
 
               {isBilingualDocxExport && (
-                <div>
-                  <label className="mb-1 block text-xs font-medium text-slate-700">双语字体组合</label>
-                  <div className="space-y-1">
-                    {BILINGUAL_EXPORT_FONT_OPTIONS.map((opt) => (
-                      <label
-                        key={opt.id}
-                        className="flex cursor-pointer items-center gap-2 rounded p-1.5 text-xs text-slate-600 hover:bg-slate-50"
-                      >
-                        <input
-                          type="radio"
-                          name="bilingualExportFont"
-                          value={opt.id}
-                          checked={options.bilingualExportFont === opt.id}
-                          onChange={() => onChange({ bilingualExportFont: opt.id })}
-                          className="h-3 w-3 text-blue-600"
-                        />
-                        <span style={{ fontFamily: opt.previewFamily }}>{opt.label}</span>
-                      </label>
-                    ))}
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div>
+                    <label className={labelClass}>双语字体组合</label>
+                    <div className="flex flex-wrap gap-2">
+                      {BILINGUAL_EXPORT_FONT_OPTIONS.map((opt) => (
+                        <label
+                          key={opt.id}
+                          className={chipRadioClass(options.bilingualExportFont === opt.id)}
+                        >
+                          <input
+                            type="radio"
+                            name="bilingualExportFont"
+                            value={opt.id}
+                            checked={options.bilingualExportFont === opt.id}
+                            onChange={() => onChange({ bilingualExportFont: opt.id })}
+                            className="sr-only"
+                          />
+                          <span style={{ fontFamily: opt.previewFamily }}>{opt.label}</span>
+                        </label>
+                      ))}
+                    </div>
                   </div>
-                </div>
-              )}
 
-              {options.originalDocxMode === 'interleaved' && isBilingualDocxExport && (
-                <div>
-                  <label className="mb-1 block text-xs font-medium text-slate-700">段段顺序</label>
-                  <div className="space-y-1">
-                    {BILINGUAL_INTERLEAVED_ORDER_OPTIONS.map((opt) => (
-                      <label
-                        key={opt.id}
-                        className="flex cursor-pointer items-center gap-2 rounded p-1.5 text-xs text-slate-600 hover:bg-slate-50"
-                      >
-                        <input
-                          type="radio"
-                          name="bilingualInterleavedOrder"
-                          value={opt.id}
-                          checked={options.bilingualInterleavedOrder === opt.id}
-                          onChange={() => onChange({ bilingualInterleavedOrder: opt.id })}
-                          className="h-3 w-3 text-blue-600"
-                        />
-                        <span>{opt.label}</span>
+                  {options.originalDocxMode === 'interleaved' && (
+                    <div>
+                      <label htmlFor="bilingualInterleavedOrder" className={labelClass}>
+                        段段顺序
                       </label>
-                    ))}
-                  </div>
+                      <select
+                        id="bilingualInterleavedOrder"
+                        className={selectClass}
+                        value={options.bilingualInterleavedOrder ?? 'source-first'}
+                        onChange={(e) =>
+                          onChange({
+                            bilingualInterleavedOrder: e.target.value as BilingualInterleavedOrder,
+                          })
+                        }
+                      >
+                        {BILINGUAL_INTERLEAVED_ORDER_OPTIONS.map((opt) => (
+                          <option key={opt.id} value={opt.id}>
+                            {opt.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -517,12 +515,12 @@ export const ExportOptionsModal: React.FC<ExportOptionsModalProps> = ({
 
           {!isInteropExport && !isOriginalFormatExport && (
             <div className="mb-4">
-              <label className="flex cursor-pointer items-center gap-2 rounded p-1.5 text-xs text-slate-600 hover:bg-slate-50">
+              <label className="flex cursor-pointer items-center gap-2.5 rounded-lg p-2 text-sm text-slate-600 hover:bg-slate-50">
                 <input
                   type="checkbox"
                   checked={options.sourceTargetOnly ?? true}
                   onChange={(e) => onChange({ sourceTargetOnly: e.target.checked })}
-                  className="h-3 w-3 text-blue-600"
+                  className="h-4 w-4 text-blue-600"
                 />
                 <span>仅导出原文和译文列（不含附加信息）</span>
               </label>
@@ -530,18 +528,18 @@ export const ExportOptionsModal: React.FC<ExportOptionsModalProps> = ({
           )}
         </div>
 
-        <div className="flex shrink-0 gap-2 border-t border-slate-200 px-5 py-3">
+        <div className="flex shrink-0 gap-3 border-t border-slate-200 px-6 py-4">
           <button
             type="button"
             onClick={onClose}
-            className="flex-1 rounded-lg bg-slate-100 px-3 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-200"
+            className="flex-1 rounded-lg bg-slate-100 px-4 py-2.5 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-200"
           >
             取消
           </button>
           <button
             type="button"
             onClick={onConfirm}
-            className="flex-1 rounded-lg bg-blue-600 px-3 py-2 text-xs font-medium text-white transition-colors hover:bg-blue-700"
+            className="flex-1 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-blue-700"
           >
             确认导出
           </button>

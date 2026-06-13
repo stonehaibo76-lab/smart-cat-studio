@@ -5,6 +5,11 @@ export function isCloudDeployment(): boolean {
   return isAuthRequired();
 }
 
+/** MT 参考（translators sidecar）仅本地/便携版可用；云端无内置侧车 */
+export function isMtReferenceSupported(): boolean {
+  return !isCloudDeployment();
+}
+
 export function dataStorageLabel(): string {
   return isCloudDeployment() ? '云端数据库' : '本地 SQLite';
 }

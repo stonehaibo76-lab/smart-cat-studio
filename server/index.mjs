@@ -77,7 +77,6 @@ app.get('/api/health', async (_req, res) => {
     const payload = { ...health, cloudMode: cloud };
     if (cloud) {
       payload.okapi = await getOkapiHealthSummary();
-      payload.mtReference = await getMtReferenceHealthSummary();
     }
     res.json(payload);
   } catch (e) {
@@ -414,21 +413,6 @@ function resolveOkapiUpstream(clientServiceUrl) {
   return assertLocalServiceUrl(String(clientServiceUrl || 'http://127.0.0.1:8090'));
 }
 
-/** Cloud: server env only (SSRF-safe). Local: client serviceUrl with localhost guard. */
-function resolveMtReferenceUpstream(clientServiceUrl) {
-  if (cloud) {
-    const url = (process.env.MT_UPSTREAM_URL || 'http://127.0.0.1:8770').trim();
-    return normalizeServiceBaseUrl(url);
-  }
-  return assertLocalServiceUrl(String(clientServiceUrl || 'http://127.0.0.1:8770'));
-}
-
-function resolveMtReferenceApiKey(clientApiKey) {
-  const serverKey = process.env.MT_REF_API_KEY?.trim();
-  if (cloud && serverKey) return serverKey;
-  return clientApiKey ? String(clientApiKey) : undefined;
-}
-
 async function getOkapiHealthSummary() {
   try {
     const upstream = resolveOkapiUpstream();
@@ -448,26 +432,6 @@ async function getOkapiHealthSummary() {
   }
 }
 
-async function getMtReferenceHealthSummary() {
-  try {
-    const upstream = resolveMtReferenceUpstream();
-    const apiKey = resolveMtReferenceApiKey();
-    const healthRes = await fetch(`${upstream}/health`, {
-      method: 'GET',
-      headers: mtReferenceAuthHeaders(apiKey),
-      signal: AbortSignal.timeout(10_000),
-    });
-    const payload = await healthRes.json().catch(() => ({}));
-    return {
-      ok: !!payload.ok,
-      translatorsVersion: payload.translators_version || payload.translatorsVersion,
-      error: payload.error,
-    };
-  } catch (e) {
-    return { ok: false, error: String(e.message || e) };
-  }
-}
-
 function mtReferenceAuthHeaders(apiKey) {
   const headers = { 'Content-Type': 'application/json' };
   if (apiKey) headers['X-API-Key'] = apiKey;
@@ -475,9 +439,15 @@ function mtReferenceAuthHeaders(apiKey) {
 }
 
 app.get('/api/mt-reference/health', async (req, res) => {
+  if (cloud) {
+    res.status(503).json({ ok: false, error: '云端版不支持 MT 参考服务' });
+    return;
+  }
   try {
-    const upstream = resolveMtReferenceUpstream(req.query.upstream);
-    const apiKey = resolveMtReferenceApiKey(req.query.apiKey);
+    const upstream = assertLocalServiceUrl(
+      String(req.query.upstream || 'http://127.0.0.1:8770')
+    );
+    const apiKey = req.query.apiKey ? String(req.query.apiKey) : undefined;
     const healthRes = await fetch(`${upstream}/health`, {
       method: 'GET',
       headers: mtReferenceAuthHeaders(apiKey),
@@ -499,6 +469,10 @@ app.get('/api/mt-reference/health', async (req, res) => {
 });
 
 app.post('/api/mt-reference/translate', async (req, res) => {
+  if (cloud) {
+    res.status(503).json({ ok: false, error: '云端版不支持 MT 参考服务' });
+    return;
+  }
   try {
     const body = req.body || {};
     const {
@@ -509,10 +483,10 @@ app.post('/api/mt-reference/translate', async (req, res) => {
       from_language: fromLanguage,
       to_language: toLanguage,
     } = body;
-    const upstream = resolveMtReferenceUpstream(upstreamBaseUrl);
+    const upstream = assertLocalServiceUrl(upstreamBaseUrl || 'http://127.0.0.1:8770');
     const translateRes = await fetch(`${upstream}/translate`, {
       method: 'POST',
-      headers: mtReferenceAuthHeaders(resolveMtReferenceApiKey(apiKey)),
+      headers: mtReferenceAuthHeaders(apiKey || undefined),
       body: JSON.stringify({
         text: String(text || ''),
         translator: String(translator || 'bing'),
@@ -669,28 +643,16 @@ app.post('/api/okapi/merge', maybeRequireAuth, maybeRequireWrite, express.json({
     const upstream = resolveOkapiUpstream(body.serviceUrl);
     const fileName = String(body.fileName || 'document');
     const fileBase64 = String(body.fileBase64 || '');
-    const sourceBlobId = String(body.sourceBlobId || '').trim();
     const segments = Array.isArray(body.segments) ? body.segments : [];
+    if (!fileBase64) {
+      res.status(400).json({ ok: false, error: 'fileBase64 required' });
+      return;
+    }
     if (segments.length === 0) {
       res.status(400).json({ ok: false, error: 'segments required' });
       return;
     }
-
-    let buf;
-    if (fileBase64) {
-      buf = Buffer.from(fileBase64, 'base64');
-    } else if (sourceBlobId) {
-      const blob = await store.getXliffBlob(sourceBlobId, req);
-      if (!blob) {
-        res.status(404).json({ ok: false, error: '原文件备份未找到，请重新导入文档后再导出。' });
-        return;
-      }
-      buf = Buffer.isBuffer(blob) ? blob : Buffer.from(blob);
-    } else {
-      res.status(400).json({ ok: false, error: 'fileBase64 required' });
-      return;
-    }
-
+    const buf = Buffer.from(fileBase64, 'base64');
     const result = await okapiMergeBuffer(
       upstream,
       fileName,

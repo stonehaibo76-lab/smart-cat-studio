@@ -73,7 +73,7 @@ import {
   logout,
   type AuthUser,
 } from './services/authService';
-import { isCloudDeployment } from './services/deploymentMode';
+import { isCloudDeployment, isMtReferenceSupported } from './services/deploymentMode';
 
 const Resources = lazy(() => import('./pages/Resources').then((m) => ({ default: m.Resources })));
 const Help = lazy(() => import('./pages/Help').then((m) => ({ default: m.Help })));
@@ -1819,7 +1819,9 @@ const App: React.FC = () => {
         isSaving={isSaving}
         favoriteUrls={favoriteUrls}
         onOpenOnlineDictionary={openOnlineDictionaryPage}
-        onOpenMtReference={mtReferenceSettings.enabled ? openMtReferencePanel : undefined}
+        onOpenMtReference={
+          isMtReferenceSupported() && mtReferenceSettings.enabled ? openMtReferencePanel : undefined
+        }
         reduceVisualEffects={performanceSettings.performanceMode}
         authUser={isAuthRequired() ? authUser : null}
         onLogout={isAuthRequired() ? handleLogout : undefined}

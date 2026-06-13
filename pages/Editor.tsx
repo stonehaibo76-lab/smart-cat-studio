@@ -108,6 +108,14 @@ import {
 import { runProofreadBatch, type ProofreadBatchStats } from '../services/proofreadService';
 import { TermLensRow } from '../components/TermLensRow';
 import { QuickMtPopup } from '../components/QuickMtPopup';
+import { isMtReferenceSupported } from '../services/deploymentMode';
+
+function preTranslateStrategyForDeployment(strategy: PreTranslateStrategy): PreTranslateStrategy {
+  if (isMtReferenceSupported()) return strategy;
+  if (strategy === 'tmMt') return 'tmOnly';
+  if (strategy === 'tmMtLlm') return 'tmLlm';
+  return strategy;
+}
 
 function deliveryDueBannerLook(kind: DeliveryDueReminder['kind']) {
   switch (kind) {
@@ -1325,6 +1333,12 @@ export const Editor: React.FC<EditorProps> = ({
     onEditorPlaceChange,
     reduceVisualEffects = false,
 }) => {
+  const mtSupported = isMtReferenceSupported();
+  const effectiveMtSettings = useMemo(
+    () => (mtSupported ? mtReferenceSettings : { ...mtReferenceSettings, enabled: false }),
+    [mtReferenceSettings, mtSupported]
+  );
+
   // 导出文件功能
   const handleExportFile = () => {
     if (!project || !activeFileId) return;
@@ -1513,7 +1527,9 @@ export const Editor: React.FC<EditorProps> = ({
   const [batchPrompt, setBatchPrompt] = useState('');
   const [batchProgress, setBatchProgress] = useState({ current: 0, total: 0 });
   const [batchStats, setBatchStats] = useState({ succeeded: 0, failed: 0 });
-  const [batchStrategy, setBatchStrategy] = useState<PreTranslateStrategy>('tmMtLlm');
+  const [batchStrategy, setBatchStrategy] = useState<PreTranslateStrategy>(() =>
+    isMtReferenceSupported() ? 'tmMtLlm' : 'tmLlm'
+  );
   const [batchFuzzyThreshold, setBatchFuzzyThreshold] = useState(75);
   const [batchSourceStats, setBatchSourceStats] = useState<PreTranslateBatchStats | null>(null);
   const [isProofreadModalOpen, setIsProofreadModalOpen] = useState(false);
@@ -1577,7 +1593,7 @@ export const Editor: React.FC<EditorProps> = ({
   const dictLookupTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastAutoDictQueryRef = useRef('');
   const [bottomPanelTab, setBottomPanelTab] = useState<EditorBottomPanelTab>('dictionary');
-  const [mtTranslatorId, setMtTranslatorId] = useState(mtReferenceSettings.defaultTranslator);
+  const [mtTranslatorId, setMtTranslatorId] = useState(effectiveMtSettings.defaultTranslator);
   const [mtLoading, setMtLoading] = useState(false);
   const [mtError, setMtError] = useState<string | null>(null);
   const [mtResult, setMtResult] = useState<string | null>(null);
@@ -1587,18 +1603,18 @@ export const Editor: React.FC<EditorProps> = ({
   const [mtCompareModalOpen, setMtCompareModalOpen] = useState(false);
 
   const mtTranslatorOptions = useMemo(
-    () => MT_TRANSLATOR_OPTIONS.filter((o) => mtReferenceSettings.enabledTranslators.includes(o.id)),
-    [mtReferenceSettings.enabledTranslators]
+    () => MT_TRANSLATOR_OPTIONS.filter((o) => effectiveMtSettings.enabledTranslators.includes(o.id)),
+    [effectiveMtSettings.enabledTranslators]
   );
 
   useEffect(() => {
     if (!mtTranslatorOptions.some((o) => o.id === mtTranslatorId)) {
       const fallback =
-        mtTranslatorOptions.find((o) => o.id === mtReferenceSettings.defaultTranslator) ??
+        mtTranslatorOptions.find((o) => o.id === effectiveMtSettings.defaultTranslator) ??
         mtTranslatorOptions[0];
       if (fallback) setMtTranslatorId(fallback.id);
     }
-  }, [mtTranslatorOptions, mtTranslatorId, mtReferenceSettings.defaultTranslator]);
+  }, [mtTranslatorOptions, mtTranslatorId, effectiveMtSettings.defaultTranslator]);
 
   const resolveDictionaryQuery = useCallback((): string => {
     const sel = window.getSelection()?.toString().trim() || currentSelectedText.trim();
@@ -1630,21 +1646,21 @@ export const Editor: React.FC<EditorProps> = ({
       const q = raw.trim().replace(/\s+/g, ' ');
       setDictQuery(q);
       setMtCompareModalOpen(true);
-      if (!mtReferenceSettings.compareMode) {
+      if (!effectiveMtSettings.compareMode) {
         onUpdateMtReferenceSettings?.({
           ...mtReferenceSettings,
           compareMode: true,
         });
       }
     },
-    [mtReferenceSettings, onUpdateMtReferenceSettings]
+    [effectiveMtSettings, mtReferenceSettings, onUpdateMtReferenceSettings]
   );
 
   const openMtReferenceWithQuery = useCallback(
     (raw: string, compact = false) => {
       const q = raw.trim().replace(/\s+/g, ' ');
       setDictQuery(q);
-      if (mtReferenceSettings.compareMode) {
+      if (effectiveMtSettings.compareMode) {
         setMtCompareModalOpen(true);
         return;
       }
@@ -1652,12 +1668,12 @@ export const Editor: React.FC<EditorProps> = ({
       setDictPanelOpen(true);
       setDictPanelCollapsed(compact);
     },
-    [mtReferenceSettings.compareMode]
+    [effectiveMtSettings.compareMode]
   );
 
   const runMtReferenceLookup = useCallback(
     async (rawQuery?: string) => {
-      if (!mtReferenceSettings.enabled) return;
+      if (!effectiveMtSettings.enabled) return;
       const q = (rawQuery ?? (dictQuery.trim() || resolveSegmentSourceQuery()))
         .trim()
         .replace(/\s+/g, ' ');
@@ -1668,9 +1684,9 @@ export const Editor: React.FC<EditorProps> = ({
         return;
       }
 
-      if (mtReferenceSettings.compareMode) {
-        const ids = (mtReferenceSettings.compareTranslators ?? [])
-          .filter((id) => mtReferenceSettings.enabledTranslators.includes(id))
+      if (effectiveMtSettings.compareMode) {
+        const ids = (effectiveMtSettings.compareTranslators ?? [])
+          .filter((id) => effectiveMtSettings.enabledTranslators.includes(id))
           .slice(0, MT_COMPARE_MAX);
         if (ids.length === 0) {
           setMtCompareResults([]);
@@ -1694,7 +1710,7 @@ export const Editor: React.FC<EditorProps> = ({
             ids,
             project.sourceLang,
             project.targetLang,
-            mtReferenceSettings
+            effectiveMtSettings
           );
           setMtCompareResults(rows);
           const firstOk = rows.find((r) => r.status === 'ok');
@@ -1718,7 +1734,7 @@ export const Editor: React.FC<EditorProps> = ({
           mtTranslatorId,
           project.sourceLang,
           project.targetLang,
-          mtReferenceSettings
+          effectiveMtSettings
         );
         if (r.ok) {
           setMtResult(r.text ?? '');
@@ -1732,7 +1748,7 @@ export const Editor: React.FC<EditorProps> = ({
         setMtLoading(false);
       }
     },
-    [mtReferenceSettings, mtTranslatorId, project, dictQuery, resolveSegmentSourceQuery]
+    [effectiveMtSettings, mtTranslatorId, project, dictQuery, resolveSegmentSourceQuery]
   );
 
   const scheduleDictionaryLookup = useCallback(
@@ -1773,7 +1789,7 @@ export const Editor: React.FC<EditorProps> = ({
   }, []);
 
   useEffect(() => {
-    if (!mtReferenceSettings.enabled || !mtReferenceSettings.autoLookupOnSegmentChange) return;
+    if (!effectiveMtSettings.enabled || !effectiveMtSettings.autoLookupOnSegmentChange) return;
     if (!activeSegmentId) return;
     const q = resolveSegmentSourceQuery();
     if (!q) return;
@@ -1782,17 +1798,17 @@ export const Editor: React.FC<EditorProps> = ({
   }, [
     activeSegmentId,
     activeFileId,
-    mtReferenceSettings.enabled,
-    mtReferenceSettings.autoLookupOnSegmentChange,
+    effectiveMtSettings.enabled,
+    effectiveMtSettings.autoLookupOnSegmentChange,
     resolveSegmentSourceQuery,
     openMtReferenceWithQuery,
   ]);
 
   useEffect(() => {
-    if (!mtReferenceSettings.enabled) return;
-    const modalActive = mtCompareModalOpen && mtReferenceSettings.compareMode;
+    if (!effectiveMtSettings.enabled) return;
+    const modalActive = mtCompareModalOpen && effectiveMtSettings.compareMode;
     const panelActive =
-      bottomPanelTab === 'mt' && dictPanelOpen && !mtReferenceSettings.compareMode;
+      bottomPanelTab === 'mt' && dictPanelOpen && !effectiveMtSettings.compareMode;
     if (!modalActive && !panelActive) return;
     const q = dictQuery.trim() || resolveSegmentSourceQuery();
     if (q) void runMtReferenceLookup(q);
@@ -1803,16 +1819,16 @@ export const Editor: React.FC<EditorProps> = ({
     dictQuery,
     mtTranslatorId,
     activeSegmentId,
-    mtReferenceSettings.enabled,
-    mtReferenceSettings.compareMode,
-    mtReferenceSettings.compareTranslators,
+    effectiveMtSettings.enabled,
+    effectiveMtSettings.compareMode,
+    effectiveMtSettings.compareTranslators,
     resolveSegmentSourceQuery,
     runMtReferenceLookup,
   ]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (!mtReferenceSettings.enabled) return;
+      if (!effectiveMtSettings.enabled) return;
       if (!e.ctrlKey && !e.metaKey) return;
       if (e.key.toLowerCase() !== 'm' || !e.shiftKey) return;
       const t = e.target as HTMLElement | null;
@@ -1825,7 +1841,7 @@ export const Editor: React.FC<EditorProps> = ({
     window.addEventListener('keydown', onKey, true);
     return () => window.removeEventListener('keydown', onKey, true);
   }, [
-    mtReferenceSettings.enabled,
+    effectiveMtSettings.enabled,
     resolveSegmentSourceQuery,
     openMtReferenceWithQuery,
   ]);
@@ -1858,7 +1874,7 @@ export const Editor: React.FC<EditorProps> = ({
   useEffect(() => {
     if (!editorMtReferenceOpenerRef) return;
     editorMtReferenceOpenerRef.current = () => {
-      if (!mtReferenceSettings.enabled) return;
+      if (!effectiveMtSettings.enabled) return;
       const q = resolveSegmentSourceQuery();
       openMtReferenceWithQuery(q, false);
     };
@@ -1867,7 +1883,7 @@ export const Editor: React.FC<EditorProps> = ({
     };
   }, [
     editorMtReferenceOpenerRef,
-    mtReferenceSettings.enabled,
+    effectiveMtSettings.enabled,
     resolveSegmentSourceQuery,
     openMtReferenceWithQuery,
   ]);
@@ -2074,6 +2090,7 @@ export const Editor: React.FC<EditorProps> = ({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (!mtSupported) return;
       if (e.ctrlKey && e.key.toLowerCase() === 'm') {
         e.preventDefault();
         const text = currentSelectedText.trim() || activeSegment?.sourceText?.trim() || '';
@@ -2085,7 +2102,7 @@ export const Editor: React.FC<EditorProps> = ({
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [currentSelectedText, activeSegment?.sourceText]);
+  }, [currentSelectedText, activeSegment?.sourceText, mtSupported]);
 
   const performConcordanceSearch = (query: string) => {
       if (!allTMs.length || !query.trim()) {
@@ -3132,19 +3149,19 @@ export const Editor: React.FC<EditorProps> = ({
     (text?: string) => {
       const t =
         text?.trim() ||
-        (mtReferenceSettings.compareMode
+        (effectiveMtSettings.compareMode
           ? mtCompareResults.find((r) => r.translatorId === mtCompareSelectedId)?.text
           : mtResult)?.trim();
       if (t) copyTextToClipboard(t);
     },
-    [mtReferenceSettings.compareMode, mtCompareResults, mtCompareSelectedId, mtResult]
+    [effectiveMtSettings.compareMode, mtCompareResults, mtCompareSelectedId, mtResult]
   );
 
   const handleInsertMtReference = useCallback(
     (text?: string, mode: 'replace' | 'insert-at-cursor' = 'replace') => {
       const t =
         text?.trim() ||
-        (mtReferenceSettings.compareMode
+        (effectiveMtSettings.compareMode
           ? mtCompareResults.find((r) => r.translatorId === mtCompareSelectedId)?.text
           : mtResult)?.trim();
       if (!t || !activeSegmentId || !activeSegment || activeSegment.isLocked) return;
@@ -3187,7 +3204,7 @@ export const Editor: React.FC<EditorProps> = ({
       }, 0);
     },
     [
-      mtReferenceSettings.compareMode,
+      effectiveMtSettings.compareMode,
       mtCompareResults,
       mtCompareSelectedId,
       mtResult,
@@ -4105,7 +4122,9 @@ export const Editor: React.FC<EditorProps> = ({
   };
 
   const executeBatchTranslation = async (useSmartPrompt: boolean) => {
-      const strategy: PreTranslateStrategy = useSmartPrompt ? 'tmMtLlm' : batchStrategy;
+      const strategy = preTranslateStrategyForDeployment(
+        useSmartPrompt ? 'tmMtLlm' : batchStrategy
+      );
       if ((strategy === 'tmMtLlm' || strategy === 'tmLlm' || strategy === 'llmOnly') && getAIReadinessError(aiSettings)) {
           alert(getAIReadinessError(aiSettings));
           handleBatchModalClose();
@@ -4134,7 +4153,7 @@ export const Editor: React.FC<EditorProps> = ({
                   fuzzyThreshold: batchFuzzyThreshold,
                   contextDescription: contextToUse,
                   aiSettings,
-                  mtSettings: mtReferenceSettings,
+                  mtSettings: effectiveMtSettings,
                   sourceLang: project.sourceLang,
                   targetLang: project.targetLang,
                   tms: allTMs,
@@ -5854,11 +5873,11 @@ export const Editor: React.FC<EditorProps> = ({
                   if (q) void runMtReferenceLookup(q);
                 }
               }}
-              mtReferenceEnabled={mtReferenceSettings.enabled}
+              mtReferenceEnabled={effectiveMtSettings.enabled}
               mtTranslators={mtTranslatorOptions}
               mtTranslatorId={mtTranslatorId}
               onMtTranslatorChange={setMtTranslatorId}
-              mtAutoLookup={mtReferenceSettings.autoLookupOnSegmentChange}
+              mtAutoLookup={effectiveMtSettings.autoLookupOnSegmentChange}
               onMtAutoLookupChange={(enabled) =>
                 onUpdateMtReferenceSettings?.({
                   ...mtReferenceSettings,
@@ -7418,7 +7437,7 @@ export const Editor: React.FC<EditorProps> = ({
             document.body
         )}
 
-        {mtCompareModalOpen &&
+        {mtSupported && mtCompareModalOpen &&
           createPortal(
             <MtCompareModal
               open={mtCompareModalOpen}
@@ -7428,7 +7447,7 @@ export const Editor: React.FC<EditorProps> = ({
               tagWarning={segmentMayHaveInlineTags(
                 currentSelectedText.trim() || activeSegment?.sourceText || dictQuery
               )}
-              autoLookup={mtReferenceSettings.autoLookupOnSegmentChange}
+              autoLookup={effectiveMtSettings.autoLookupOnSegmentChange}
               onAutoLookupChange={(enabled) =>
                 onUpdateMtReferenceSettings?.({
                   ...mtReferenceSettings,
@@ -7436,7 +7455,7 @@ export const Editor: React.FC<EditorProps> = ({
                 })
               }
               translators={mtTranslatorOptions}
-              compareTranslators={mtReferenceSettings.compareTranslators ?? []}
+              compareTranslators={effectiveMtSettings.compareTranslators ?? []}
               onCompareTranslatorsChange={(ids) =>
                 onUpdateMtReferenceSettings?.({
                   ...mtReferenceSettings,
@@ -7491,9 +7510,13 @@ export const Editor: React.FC<EditorProps> = ({
                                     className="w-full text-sm border border-slate-300 rounded-lg px-2 py-1.5"
                                 >
                                     <option value="tmOnly">仅 TM（100% / 模糊）</option>
-                                    <option value="tmMt">TM + MT 参考</option>
+                                    {mtSupported ? (
+                                      <>
+                                        <option value="tmMt">TM + MT 参考</option>
+                                        <option value="tmMtLlm">TM + MT + LLM</option>
+                                      </>
+                                    ) : null}
                                     <option value="tmLlm">TM + LLM</option>
-                                    <option value="tmMtLlm">TM + MT + LLM</option>
                                     <option value="llmOnly">仅 LLM</option>
                                 </select>
                                 <label className="text-xs text-slate-500 flex items-center gap-2">
@@ -7634,12 +7657,13 @@ export const Editor: React.FC<EditorProps> = ({
             document.body
         )}
 
+        {mtSupported && (
         <QuickMtPopup
             open={quickMtOpen}
             sourceText={quickMtSource}
             sourceLang={project.sourceLang}
             targetLang={project.targetLang}
-            mtSettings={mtReferenceSettings}
+            mtSettings={effectiveMtSettings}
             onClose={() => setQuickMtOpen(false)}
             onInsert={(text) => {
                 if (activeSegmentId) {
@@ -7648,6 +7672,7 @@ export const Editor: React.FC<EditorProps> = ({
                 }
             }}
         />
+        )}
 
         {isProofreadModalOpen && createPortal(
             <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-[100] flex items-center justify-center p-4">

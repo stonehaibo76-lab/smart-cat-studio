@@ -1502,9 +1502,9 @@ const SettingsSection = () => {
     <div>
       <h2 className="text-3xl font-bold text-slate-900 mb-4">系统设置页面</h2>
       <p className="text-lg text-slate-600">
-        系统设置分为多个面板：AI 引擎、MT 参考、向量检索（知识库 RAG）、{cloud ? '云端数据' : '本地数据（SQLite 路径与备份导入导出）'}、以及 AI 对话快捷按钮。
+        系统设置分为多个面板：AI 引擎、{cloud ? null : 'MT 参考、'}向量检索（知识库 RAG）、{cloud ? '云端数据' : '本地数据（SQLite 路径与备份导入导出）'}、以及 AI 对话快捷按钮。
         {cloud
-          ? ' 云端版登录后即可读写项目数据，无需在本机启动数据库服务。'
+          ? ' 云端版登录后即可读写项目数据，无需在本机启动数据库服务；机器翻译参考（MT）仅在本地/便携版可用，云端请使用 AI 引擎对照。'
           : ' 使用前需已启动本地数据服务（见下方说明），否则应用无法读写项目数据。'}
       </p>
     </div>
@@ -1546,19 +1546,17 @@ const SettingsSection = () => {
           </div>
           <div className="bg-indigo-50 p-4 rounded-lg border border-indigo-200 mt-4">
             <strong className="text-slate-900">机器翻译参考（translators，独立于 AI 引擎）：</strong>
+            {cloud ? (
+              <p className="text-sm mt-1">
+                云端版<strong className="text-slate-900">不提供</strong> MT 参考（需本机 Python sidecar）。请使用上方
+                AI 引擎进行翻译对照；本地版/便携版可在「系统设置 → MT 参考」启用后使用 17 个免费引擎对照。
+              </p>
+            ) : (
+              <>
             <p className="text-sm mt-1">
-              {cloud ? (
-                <>
-                  云端版 API 容器内置 MT 侧车，在「系统设置 → MT 参考」中启用并「测试连接」即可，无需在本机启动
-                  Python。单引擎对照在编辑页底部「MT 参考」Tab；多引擎对比在编辑页内全屏弹层。
-                </>
-              ) : (
-                <>
-                  在「系统设置 → MT 参考」中启用本地 Python sidecar（默认{' '}
-                  <code className="text-xs bg-slate-200 px-1 rounded">http://127.0.0.1:8770</code>
-                  ）。单引擎对照在编辑页底部「MT 参考」Tab；多引擎对比在编辑页内全屏弹层（设置中勾选「默认使用多引擎对比」，或底部面板点「多引擎对比…」）。
-                </>
-              )}
+              在「系统设置 → MT 参考」中启用本地 Python sidecar（默认{' '}
+              <code className="text-xs bg-slate-200 px-1 rounded">http://127.0.0.1:8770</code>
+              ）。单引擎对照在编辑页底部「MT 参考」Tab；多引擎对比在编辑页内全屏弹层（设置中勾选「默认使用多引擎对比」，或底部面板点「多引擎对比…」）。
               打开方式：<strong className="text-slate-800">Ctrl+Shift+M</strong>（译文框内也可用）、标题栏「MT 参考」、或勾选设置里的「句段切换时自动查询」后切换句段（对比模式开弹层，单引擎开底部面板）。
               快捷键{' '}
               <kbd className="px-1 py-0.5 bg-white border border-slate-300 rounded text-xs">Ctrl+Shift+M</kbd>
@@ -1576,6 +1574,8 @@ const SettingsSection = () => {
               </a>{' '}
              （UlionTse，GPL-3.0），通过抓取第三方站点实现，稳定性与合规性有限，仅供个人参考对照，不建议商用批量调用。各引擎按场景选用见下方「MT 引擎推荐」。
             </p>
+              </>
+            )}
           </div>
           <div className="bg-blue-50 p-4 rounded-lg border border-blue-200">
             <strong className="text-slate-900">配置 API Key：</strong>

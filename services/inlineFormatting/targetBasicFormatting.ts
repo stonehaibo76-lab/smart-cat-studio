@@ -28,54 +28,7 @@ function runStyleHasFormatting(style: InlineRunStyle): boolean {
 }
 
 function newRunId(styleKey: BasicRunStyleKey): string {
-  const prefix = styleKey === 'bold' ? 'fb' : styleKey === 'italic' ? 'fi' : 'fu';
-  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
-}
-
-function mergeStyleFields(into: InlineRunStyle, from: InlineRunStyle): void {
-  if (from.bold) into.bold = true;
-  if (from.italic) into.italic = true;
-  if (from.underline) into.underline = true;
-  if (from.strike) into.strike = true;
-  if (from.color) into.color = from.color;
-  if (from.highlight) into.highlight = from.highlight;
-  if (from.vertAlign) into.vertAlign = from.vertAlign;
-}
-
-/** Collect character-format flags already present on tagged runs overlapping the selection. */
-function mergedStyleInPlainSelection(
-  targetText: string,
-  plainSelection: { start: number; end: number },
-  styleKey: BasicRunStyleKey,
-  existingMeta?: InlineRunStyle[]
-): InlineRunStyle {
-  const s = Math.max(0, plainSelection.start);
-  const e = Math.max(s, plainSelection.end);
-  const meta = metaMap(existingMeta);
-  const merged: InlineRunStyle = { id: newRunId(styleKey) };
-
-  const parts = parseMarkedParts(targetText || '');
-  const normalized =
-    parts.length > 0 ? parts : [{ type: 'plain' as const, text: targetText || '' }];
-
-  let pos = 0;
-  for (const part of normalized) {
-    if (part.type === 'standalone') continue;
-    const text = part.text;
-    const partStart = pos;
-    const partEnd = pos + text.length;
-    pos = partEnd;
-
-    if (partEnd <= s || partStart >= e) continue;
-
-    if (part.type === 'tagged') {
-      const existing = meta.get(part.id);
-      if (existing) mergeStyleFields(merged, existing);
-    }
-  }
-
-  merged[styleKey] = true;
-  return merged;
+  return `fmt-${styleKey}-${Date.now().toString(36).slice(2, 9)}`;
 }
 
 /** True when every visible character in [start,end) sits in a tagged run with styleKey enabled. */
@@ -232,16 +185,7 @@ export function toggleBasicStyleOnTargetSelection(
     return removeBasicStyleFromPlainRange(targetText, { start: s, end: e }, styleKey, existingMeta);
   }
 
-  const mergedStyle = mergedStyleInPlainSelection(
-    targetText,
-    { start: s, end: e },
-    styleKey,
-    existingMeta
-  );
-  return applyRunStyleToTargetSelection(
-    targetText,
-    { start: s, end: e },
-    mergedStyle,
-    existingMeta
-  );
+  const runId = newRunId(styleKey);
+  const style: InlineRunStyle = { id: runId, [styleKey]: true };
+  return applyRunStyleToTargetSelection(targetText, { start: s, end: e }, style, existingMeta);
 }

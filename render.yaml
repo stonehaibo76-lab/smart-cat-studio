@@ -16,7 +16,3 @@ services:
         sync: false
       - key: OKAPI_UPSTREAM_URL
         value: http://127.0.0.1:8090
-      - key: MT_UPSTREAM_URL
-        value: http://127.0.0.1:8770
-      - key: MT_REF_PREACCELERATE
-        value: "0"
