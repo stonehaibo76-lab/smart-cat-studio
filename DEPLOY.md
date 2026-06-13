@@ -39,7 +39,7 @@ git push -u origin main
 | `FRONTEND_URL` | Vercel 域名（部署前端后填写） |
 | `OKAPI_UPSTREAM_URL` | 可选，默认 `http://127.0.0.1:8090`（容器内 Okapi 地址） |
 
-4. 容器启动：直接运行 `node server/index.mjs`；云端模式下 API 进程会同时拉起 Okapi 侧车（8090）。`scripts/cloud-start.mjs` 为兼容入口，内部同样委托给 `server/index.mjs`。
+4. 容器启动：`scripts/render-start.sh` 先后台启动 Okapi（8090），确认健康后再 `exec node server/index.mjs`（Render 通过 Dockerfile `CMD` 配置）。
 5. 验证：
    - `https://<api>.onrender.com/api/health` 返回 `ok: true, cloudMode: true`
    - `https://<api>.onrender.com/api/okapi/health` 返回 `ok: true, mergeSupported: true`

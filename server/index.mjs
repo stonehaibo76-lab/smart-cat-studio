@@ -598,10 +598,31 @@ async function okapiMergeBuffer(upstream, fileName, buf, segments, exportFont, p
 app.get('/api/okapi/health', async (req, res) => {
   try {
     const upstream = resolveOkapiUpstream(req.query.serviceUrl);
-    const healthRes = await fetch(`${upstream}/health`, {
+    let healthRes = await fetch(`${upstream}/health`, {
       method: 'GET',
       signal: AbortSignal.timeout(15_000),
-    });
+    }).catch(() => null);
+
+    if ((!healthRes || !healthRes.ok) && cloud && process.env.SMARTCAT_SPAWN_OKAPI !== '0') {
+      startOkapiSidecar(projectRoot);
+      await waitForOkapiSidecar(upstream, 20_000);
+      healthRes = await fetch(`${upstream}/health`, {
+        method: 'GET',
+        signal: AbortSignal.timeout(15_000),
+      }).catch(() => null);
+    }
+
+    if (!healthRes || !healthRes.ok) {
+      res.status(502).json({
+        ok: false,
+        error: healthRes ? `sidecar HTTP ${healthRes.status}` : 'fetch failed',
+        hint: cloud
+          ? 'Okapi 侧车未在容器内监听 8090。请查看 Render 日志中 [render-start] 行。'
+          : undefined,
+      });
+      return;
+    }
+
     const payload = await healthRes.json().catch(() => ({}));
     res.json({
       ok: !!payload.ok,

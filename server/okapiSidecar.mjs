@@ -35,6 +35,12 @@ export function startOkapiSidecar(projectRoot) {
     }
   );
 
+  proc.on('error', (err) => {
+    console.error('[okapi-sidecar] spawn error:', err);
+    proc = null;
+    started = false;
+  });
+
   proc.on('exit', (code, signal) => {
     console.error(`[okapi-sidecar] exited (code=${code}, signal=${signal})`);
     proc = null;
