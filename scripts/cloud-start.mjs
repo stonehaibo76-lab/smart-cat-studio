@@ -1,5 +1,6 @@
 /**
- * Cloud container entry: start Okapi sidecar (8090) then Node API.
+ * Cloud container entry: start Okapi sidecar (8090) and Node API in parallel.
+ * Node binds $PORT immediately so Render health checks pass; Okapi warms up in background.
  */
 import { spawn } from 'child_process';
 import path from 'path';
@@ -11,8 +12,10 @@ const okapiDir = path.join(projectRoot, 'scripts', 'okapi-sidecar');
 const OKAPI_PORT = Number(process.env.OKAPI_PORT || 8090);
 const OKAPI_HOST = process.env.OKAPI_HOST || '127.0.0.1';
 const OKAPI_URL = `http://${OKAPI_HOST}:${OKAPI_PORT}`;
-const HEALTH_TIMEOUT_MS = 60_000;
+const HEALTH_TIMEOUT_MS = 120_000;
 const POLL_MS = 500;
+
+const pythonBin = 'python3';
 
 let okapiProc = null;
 let nodeProc = null;
@@ -40,9 +43,9 @@ async function waitForOkapiHealth() {
 }
 
 function startOkapi() {
-  log(`Starting Okapi sidecar at ${OKAPI_URL}…`);
+  log(`Starting Okapi sidecar at ${OKAPI_URL} (${pythonBin})…`);
   okapiProc = spawn(
-    'python3',
+    pythonBin,
     ['-m', 'uvicorn', 'main:app', '--host', OKAPI_HOST, '--port', String(OKAPI_PORT)],
     {
       cwd: okapiDir,
@@ -82,12 +85,16 @@ process.on('SIGINT', () => shutdown(0));
 process.on('SIGTERM', () => shutdown(0));
 
 startOkapi();
+startNode();
 
-const ready = await waitForOkapiHealth();
-if (!ready) {
-  log(`Okapi did not become healthy within ${HEALTH_TIMEOUT_MS / 1000}s.`);
-  shutdown(1);
-} else {
-  log('Okapi is ready.');
-  startNode();
-}
+void (async () => {
+  const ready = await waitForOkapiHealth();
+  if (ready) {
+    log('Okapi is ready.');
+  } else {
+    log(
+      `Warning: Okapi did not become healthy within ${HEALTH_TIMEOUT_MS / 1000}s. ` +
+        'API is running; Okapi export may be unavailable until sidecar recovers.'
+    );
+  }
+})();
