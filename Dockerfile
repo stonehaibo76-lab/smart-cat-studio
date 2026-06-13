@@ -17,7 +17,8 @@ RUN npm ci --omit=dev \
 COPY scripts/okapi-sidecar/requirements.txt scripts/okapi-sidecar/requirements.txt
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
 RUN pip3 install --upgrade pip \
-  && pip3 install --no-cache-dir -r scripts/okapi-sidecar/requirements.txt
+  && pip3 install --no-cache-dir -r scripts/okapi-sidecar/requirements.txt \
+  && python3 -m uvicorn --version
 
 COPY . .
 
@@ -26,4 +27,4 @@ ENV OKAPI_UPSTREAM_URL=http://127.0.0.1:8090
 
 EXPOSE 10000
 
-CMD ["node", "scripts/cloud-start.mjs"]
+CMD ["node", "server/index.mjs"]

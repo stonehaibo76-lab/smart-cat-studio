@@ -277,9 +277,14 @@ export async function okapiMergeFile(
       return await mergeViaServerByBlob(options.sourceBlobId, fileName, segments, options);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
+      if (/failed to fetch|network|abort/i.test(msg)) {
+        throw new Error(
+          '无法连接云端 API（merge-by-blob）。请确认 Render 服务已启动且 VITE_API_BASE_URL 配置正确；若刚部署请等待 1～2 分钟让 Okapi 侧车就绪。'
+        );
+      }
       if (!/404|not found/i.test(msg)) {
         throw new Error(
-          msg.includes('Okapi') || msg.includes('merge')
+          msg.includes('Okapi') || msg.includes('merge') || msg.includes('侧车')
             ? msg
             : `云端保真导出失败：${msg}。请确认 API 已部署 Okapi 侧车（/api/okapi/health）。`
         );

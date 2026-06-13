@@ -12,6 +12,7 @@ import {
   maybeRequireAuth,
   maybeRequireWrite,
 } from './auth.mjs';
+import { startOkapiSidecar, waitForOkapiSidecar } from './okapiSidecar.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.join(__dirname, '..');
@@ -548,6 +549,14 @@ function buildMergedFileName(fileName, headerName) {
 }
 
 async function okapiMergeBuffer(upstream, fileName, buf, segments, exportFont, pptxFontScale) {
+  if (cloud) {
+    const ready = await waitForOkapiSidecar(upstream, 30_000);
+    if (!ready) {
+      const err = new Error('Okapi 侧车未就绪，请等待约 1 分钟后重试，或查看 Render 日志中 [okapi-sidecar] 启动信息。');
+      err.status = 503;
+      throw err;
+    }
+  }
   const form = new FormData();
   form.append('file', new Blob([buf]), fileName);
   form.append('segments_json', JSON.stringify(segments));
@@ -770,6 +779,11 @@ const host =
     : '127.0.0.1';
 
 const server = http.createServer(app);
+
+if (cloud && process.env.SMARTCAT_SPAWN_OKAPI !== '0') {
+  startOkapiSidecar(projectRoot);
+}
+
 server.listen(PORT, host, () => {
   const mode = cloud ? 'Cloud (PostgreSQL)' : 'Local (SQLite)';
   const uiNote = serveStatic ? ' + static UI' : '';
