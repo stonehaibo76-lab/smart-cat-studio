@@ -74,7 +74,11 @@ if (cloud && store.pool) {
 app.get('/api/health', async (_req, res) => {
   try {
     const health = await store.getHealth();
-    res.json({ ...health, cloudMode: cloud });
+    const payload = { ...health, cloudMode: cloud };
+    if (cloud) {
+      payload.okapi = await getOkapiHealthSummary();
+    }
+    res.json(payload);
   } catch (e) {
     console.error(e);
     res.status(500).json({ ok: false, error: String(e.message || e) });
@@ -400,6 +404,34 @@ function assertLocalServiceUrl(baseUrl) {
   return normalizeServiceBaseUrl(baseUrl);
 }
 
+/** Cloud: server env only (SSRF-safe). Local: client serviceUrl with localhost guard. */
+function resolveOkapiUpstream(clientServiceUrl) {
+  if (cloud) {
+    const url = (process.env.OKAPI_UPSTREAM_URL || 'http://127.0.0.1:8090').trim();
+    return normalizeServiceBaseUrl(url);
+  }
+  return assertLocalServiceUrl(String(clientServiceUrl || 'http://127.0.0.1:8090'));
+}
+
+async function getOkapiHealthSummary() {
+  try {
+    const upstream = resolveOkapiUpstream();
+    const healthRes = await fetch(`${upstream}/health`, {
+      method: 'GET',
+      signal: AbortSignal.timeout(15_000),
+    });
+    const payload = await healthRes.json().catch(() => ({}));
+    return {
+      ok: !!payload.ok,
+      version: payload.version,
+      error: payload.error,
+      mergeSupported: payload.mergeSupported !== false,
+    };
+  } catch (e) {
+    return { ok: false, error: String(e.message || e), mergeSupported: false };
+  }
+}
+
 function mtReferenceAuthHeaders(apiKey) {
   const headers = { 'Content-Type': 'application/json' };
   if (apiKey) headers['X-API-Key'] = apiKey;
@@ -501,9 +533,54 @@ app.post('/api/tm/search', maybeRequireAuth, async (req, res) => {
 // --- Okapi sidecar proxy ---
 const OKAPI_TIMEOUT_MS = 300_000;
 
+function buildMergedFileName(fileName, headerName) {
+  if (headerName) return headerName;
+  const ext = fileName.includes('.') ? fileName.slice(fileName.lastIndexOf('.')) : '.docx';
+  return `${fileName.replace(/\.[^.]+$/, '')}_译文${ext}`;
+}
+
+async function okapiMergeBuffer(upstream, fileName, buf, segments, exportFont, pptxFontScale) {
+  const form = new FormData();
+  form.append('file', new Blob([buf]), fileName);
+  form.append('segments_json', JSON.stringify(segments));
+  form.append('export_font', String(exportFont || 'simsun').trim());
+  if (pptxFontScale != null && pptxFontScale !== '') {
+    form.append('pptx_font_scale', String(pptxFontScale));
+  }
+  const mergeRes = await fetch(`${upstream}/merge`, {
+    method: 'POST',
+    body: form,
+    signal: AbortSignal.timeout(OKAPI_TIMEOUT_MS),
+  });
+  if (!mergeRes.ok) {
+    const errPayload = await mergeRes.json().catch(async () => ({
+      error: await mergeRes.text(),
+    }));
+    const err = new Error(errPayload.error || mergeRes.statusText || 'merge failed');
+    err.status = mergeRes.status;
+    throw err;
+  }
+  const mergedBuf = Buffer.from(await mergeRes.arrayBuffer());
+  const b64Name = mergeRes.headers.get('x-smartcat-file-name-b64');
+  let outName = mergeRes.headers.get('x-smartcat-file-name') || '';
+  if (b64Name) {
+    try {
+      outName = Buffer.from(b64Name, 'base64').toString('utf8');
+    } catch {
+      /* keep ascii header */
+    }
+  }
+  return {
+    ok: true,
+    fileName: buildMergedFileName(fileName, outName),
+    fileBase64: mergedBuf.toString('base64'),
+    mime: mergeRes.headers.get('content-type') || 'application/octet-stream',
+  };
+}
+
 app.get('/api/okapi/health', async (req, res) => {
   try {
-    const upstream = assertLocalServiceUrl(String(req.query.serviceUrl || 'http://127.0.0.1:8090'));
+    const upstream = resolveOkapiUpstream(req.query.serviceUrl);
     const healthRes = await fetch(`${upstream}/health`, {
       method: 'GET',
       signal: AbortSignal.timeout(15_000),
@@ -523,7 +600,7 @@ app.get('/api/okapi/health', async (req, res) => {
 app.post('/api/okapi/extract', maybeRequireAuth, maybeRequireWrite, express.json({ limit: '120mb' }), async (req, res) => {
   try {
     const body = req.body || {};
-    const upstream = assertLocalServiceUrl(String(body.serviceUrl || 'http://127.0.0.1:8090'));
+    const upstream = resolveOkapiUpstream(body.serviceUrl);
     const fileName = String(body.fileName || 'document');
     const fileBase64 = String(body.fileBase64 || '');
     if (!fileBase64) {
@@ -555,7 +632,7 @@ app.post('/api/okapi/extract', maybeRequireAuth, maybeRequireWrite, express.json
 app.post('/api/okapi/merge', maybeRequireAuth, maybeRequireWrite, express.json({ limit: '120mb' }), async (req, res) => {
   try {
     const body = req.body || {};
-    const upstream = assertLocalServiceUrl(String(body.serviceUrl || 'http://127.0.0.1:8090'));
+    const upstream = resolveOkapiUpstream(body.serviceUrl);
     const fileName = String(body.fileName || 'document');
     const fileBase64 = String(body.fileBase64 || '');
     const segments = Array.isArray(body.segments) ? body.segments : [];
@@ -568,47 +645,54 @@ app.post('/api/okapi/merge', maybeRequireAuth, maybeRequireWrite, express.json({
       return;
     }
     const buf = Buffer.from(fileBase64, 'base64');
-    const form = new FormData();
-    form.append('file', new Blob([buf]), fileName);
-    form.append('segments_json', JSON.stringify(segments));
-    const exportFont = String(body.exportFont || 'simsun').trim();
-    form.append('export_font', exportFont);
-    if (body.pptxFontScale != null && body.pptxFontScale !== '') {
-      form.append('pptx_font_scale', String(body.pptxFontScale));
-    }
-    const mergeRes = await fetch(`${upstream}/merge`, {
-      method: 'POST',
-      body: form,
-      signal: AbortSignal.timeout(OKAPI_TIMEOUT_MS),
-    });
-    if (!mergeRes.ok) {
-      const errPayload = await mergeRes.json().catch(async () => ({
-        error: await mergeRes.text(),
-      }));
-      res.status(mergeRes.status).json({ ok: false, error: errPayload.error || mergeRes.statusText });
+    const result = await okapiMergeBuffer(
+      upstream,
+      fileName,
+      buf,
+      segments,
+      body.exportFont,
+      body.pptxFontScale
+    );
+    res.json(result);
+  } catch (e) {
+    const status = e.status && e.status >= 400 && e.status < 600 ? e.status : 502;
+    res.status(status).json({ ok: false, error: String(e.message || e) });
+  }
+});
+
+app.post('/api/okapi/merge-by-blob', maybeRequireAuth, maybeRequireWrite, express.json({ limit: '10mb' }), async (req, res) => {
+  try {
+    const body = req.body || {};
+    const sourceBlobId = String(body.sourceBlobId || '').trim();
+    const fileName = String(body.fileName || 'document');
+    const segments = Array.isArray(body.segments) ? body.segments : [];
+    if (!sourceBlobId) {
+      res.status(400).json({ ok: false, error: 'sourceBlobId required' });
       return;
     }
-    const mergedBuf = Buffer.from(await mergeRes.arrayBuffer());
-    const b64Name = mergeRes.headers.get('x-smartcat-file-name-b64');
-    let outName = mergeRes.headers.get('x-smartcat-file-name') || '';
-    if (b64Name) {
-      try {
-        outName = Buffer.from(b64Name, 'base64').toString('utf8');
-      } catch {
-        /* keep ascii header */
-      }
+    if (segments.length === 0) {
+      res.status(400).json({ ok: false, error: 'segments required' });
+      return;
     }
-    if (!outName) {
-      outName = `${fileName.replace(/\.[^.]+$/, '')}_译文${fileName.includes('.') ? fileName.slice(fileName.lastIndexOf('.')) : '.docx'}`;
+    const blob = await store.getXliffBlob(sourceBlobId, req);
+    if (!blob) {
+      res.status(404).json({ ok: false, error: '原文件备份未找到，请重新导入文档后再导出。' });
+      return;
     }
-    res.json({
-      ok: true,
-      fileName: outName,
-      fileBase64: mergedBuf.toString('base64'),
-      mime: mergeRes.headers.get('content-type') || 'application/octet-stream',
-    });
+    const upstream = resolveOkapiUpstream();
+    const buf = Buffer.isBuffer(blob) ? blob : Buffer.from(blob);
+    const result = await okapiMergeBuffer(
+      upstream,
+      fileName,
+      buf,
+      segments,
+      body.exportFont,
+      body.pptxFontScale
+    );
+    res.json(result);
   } catch (e) {
-    res.status(502).json({ ok: false, error: String(e.message || e) });
+    const status = e.status && e.status >= 400 && e.status < 600 ? e.status : 502;
+    res.status(status).json({ ok: false, error: String(e.message || e) });
   }
 });
 

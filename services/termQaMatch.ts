@@ -1,7 +1,13 @@
 import type { TermBaseEntry } from '../types';
+import { stripInlineMarkers } from './inlineFormatting/markerParse';
 
 export function escapeRegExp(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** 术语匹配用可见原文：去掉内联格式标签，避免《》等被拆到不同 run 后匹配失败 */
+export function plainSourceForTermMatch(sourceText: string): string {
+  return stripInlineMarkers(sourceText || '');
 }
 
 /** Term whose source is only ASCII letters (word-boundary semantics for QA). */
@@ -41,8 +47,8 @@ export interface TermHitSpan {
 }
 
 /** Longest-first non-overlapping hits on the source (QA + 原文高亮共用). */
-export function collectTermHitSpans(
-  sourceText: string,
+function collectTermHitSpansOnPlain(
+  plainSource: string,
   allEntries: TermBaseEntry[],
   ignoreCase: boolean
 ): TermHitSpan[] {
@@ -53,12 +59,12 @@ export function collectTermHitSpans(
 
   const spans: TermHitSpan[] = [];
   let i = 0;
-  const n = sourceText.length;
+  const n = plainSource.length;
 
   while (i < n) {
     let hit: TermBaseEntry | null = null;
     for (const e of sorted) {
-      if (matchesAt(sourceText, i, e, ignoreCase)) {
+      if (matchesAt(plainSource, i, e, ignoreCase)) {
         hit = e;
         break;
       }
@@ -73,6 +79,18 @@ export function collectTermHitSpans(
   return spans;
 }
 
+export function collectTermHitSpans(
+  sourceText: string,
+  allEntries: TermBaseEntry[],
+  ignoreCase: boolean
+): TermHitSpan[] {
+  return collectTermHitSpansOnPlain(
+    plainSourceForTermMatch(sourceText),
+    allEntries,
+    ignoreCase
+  );
+}
+
 export interface TermHitSegment {
   text: string;
   term: TermBaseEntry | null;
@@ -84,26 +102,27 @@ export function segmentSourceByTermHits(
   allEntries: TermBaseEntry[],
   ignoreCase: boolean = false
 ): TermHitSegment[] {
-  const spans = collectTermHitSpans(sourceText, allEntries, ignoreCase);
+  const plain = plainSourceForTermMatch(sourceText);
+  const spans = collectTermHitSpansOnPlain(plain, allEntries, ignoreCase);
   if (spans.length === 0) {
-    return [{ text: sourceText, term: null }];
+    return [{ text: plain || sourceText, term: null }];
   }
 
   const out: TermHitSegment[] = [];
   let cursor = 0;
-  const n = sourceText.length;
+  const n = plain.length;
   for (const span of spans) {
     if (cursor < span.start) {
-      out.push({ text: sourceText.slice(cursor, span.start), term: null });
+      out.push({ text: plain.slice(cursor, span.start), term: null });
     }
     out.push({
-      text: sourceText.slice(span.start, span.end),
+      text: plain.slice(span.start, span.end),
       term: span.term,
     });
     cursor = span.end;
   }
   if (cursor < n) {
-    out.push({ text: sourceText.slice(cursor), term: null });
+    out.push({ text: plain.slice(cursor), term: null });
   }
   return out;
 }
@@ -126,6 +145,17 @@ export function termSourceHitsSegment(
 ): boolean {
   if (!term.source.trim()) return false;
   return collectMatchedTermIds(sourceText, allEntries, ignoreCase).has(term.id);
+}
+
+/** 当前句段命中的术语（与 QA / 侧栏 / 原文高亮规则一致） */
+export function filterTermsMatchingSource(
+  sourceText: string,
+  allEntries: TermBaseEntry[],
+  ignoreCase: boolean = false
+): TermBaseEntry[] {
+  if (!plainSourceForTermMatch(sourceText)) return [];
+  const matchedIds = collectMatchedTermIds(sourceText, allEntries, ignoreCase);
+  return allEntries.filter((e) => e.source.trim() && matchedIds.has(e.id));
 }
 
 /** Whether the target text contains the mandatory translation (bounded for pure ASCII-letter targets). */

@@ -303,16 +303,16 @@ export const ExportOptionsModal: React.FC<ExportOptionsModalProps> = ({
             </select>
 
             {showOriginalFormatCloudHint && (
-              <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
-                当前范围无 DOCX 文件。DOCX / PPTX / TXT / HTML 保真导出需在本地版完成；云端请使用 Excel / TMX。
+              <p className="mt-2 text-[11px] leading-relaxed text-amber-700">
+                当前文件尚无原文件备份，请重新导入文档后再使用保真导出；段段/并列对照双语 DOCX 仍可从句段生成。
               </p>
             )}
-            {!cloud && originalFormatFilesInScopeCount > 0 && !canOriginalFormatExport && showDocxBilingualSubOptions && (
+            {originalFormatFilesInScopeCount > 0 && !canOriginalFormatExport && showDocxBilingualSubOptions && (
               <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
-                纯译文（保真）需原文件备份；段段/并列对照可直接从句段生成。
+                纯译文（保真）需导入时已保存原文件备份；段段/并列对照可直接从句段生成。
               </p>
             )}
-            {!cloud && originalFormatFilesInScopeCount > 0 && !canOriginalFormatExport && !showDocxBilingualSubOptions && (
+            {originalFormatFilesInScopeCount > 0 && !canOriginalFormatExport && !showDocxBilingualSubOptions && (
               <p className="mt-2 text-[11px] leading-relaxed text-amber-700">
                 当前文件尚无原文件备份，请重新导入文档后再使用保真导出。
               </p>
@@ -339,8 +339,7 @@ export const ExportOptionsModal: React.FC<ExportOptionsModalProps> = ({
               <div>
                 <label className="mb-1 block text-xs font-medium text-slate-700">原文格式样式</label>
                 <div className="ml-1 space-y-1 border-l-2 border-slate-100 pl-1">
-                  {(showDocxBilingualSubOptions || !cloud) && (
-                    <label
+                  <label
                       className={`flex items-center gap-2 rounded p-1.5 text-xs ${
                         canMonolingualOriginalExport
                           ? 'cursor-pointer text-slate-600 hover:bg-slate-50'
@@ -358,7 +357,6 @@ export const ExportOptionsModal: React.FC<ExportOptionsModalProps> = ({
                       />
                       <span>{monolingualExportStyleLabel(primaryOriginalFormatKind)}</span>
                     </label>
-                  )}
                   {showDocxBilingualSubOptions && (
                     <>
                       <label className="flex cursor-pointer items-center gap-2 rounded p-1.5 text-xs text-slate-600 hover:bg-slate-50">
@@ -388,7 +386,7 @@ export const ExportOptionsModal: React.FC<ExportOptionsModalProps> = ({
                 </div>
                 {!canMonolingualOriginalExport && showDocxBilingualSubOptions && (
                   <p className="mt-2 text-[11px] leading-relaxed text-slate-500">
-                    纯译文需在本地版运行且导入时已保存原文件（Okapi 侧车）。双语对照可在浏览器直接生成。
+                    纯译文（保真）需导入时已保存原文件备份；双语对照可直接从句段生成。
                   </p>
                 )}
                 {options.originalDocxMode === 'monolingual' && canMonolingualOriginalExport && (
@@ -516,17 +514,6 @@ export const ExportOptionsModal: React.FC<ExportOptionsModalProps> = ({
               )}
             </div>
           )}
-
-          {isOriginalFormatExport &&
-            options.originalDocxMode === 'monolingual' &&
-            !canMonolingualOriginalExport &&
-            showDocxBilingualSubOptions && (
-              <div className="mb-4">
-                <p className="text-[11px] leading-relaxed text-amber-700">
-                  当前无法使用纯译文导出。请选择段段或并列对照，或在本地版重新导入后导出保真译文。
-                </p>
-              </div>
-            )}
 
           {!isInteropExport && !isOriginalFormatExport && (
             <div className="mb-4">

@@ -1,6 +1,7 @@
 import type { OkapiSettings, ProjectFile, Segment } from '../../types';
 import { loadSourceBlob, canFormatPreservingExport } from './sourceBlobStore';
 import { okapiMergeFile } from '../okapiClient';
+import { isCloudDeployment } from '../deploymentMode';
 import { downloadBytes } from '../xliff/xliffExport';
 import {
   getOriginalFormatKind,
@@ -42,16 +43,31 @@ export async function exportOriginalFormatFile(
     );
   }
 
-  const blob = await loadSourceBlob(file.sourceBlobId!);
-  if (!blob) {
-    throw new Error('无法读取原始文件，请确认本地 DB 服务已启动并重试。');
-  }
-
   const isPptx = getOriginalFormatKind(file.name) === 'pptx';
-  const merged = await okapiMergeFile(file.name, blob, segmentsToMergePayload(segments), okapiSettings, {
+  const mergeOptions = {
     exportFont,
     pptxFontScale: isPptx && pptxFontScale != null ? clampPptxFontScale(pptxFontScale) : undefined,
-  });
+    sourceBlobId: file.sourceBlobId,
+  };
+
+  let originalBytes: ArrayBuffer;
+  if (isCloudDeployment()) {
+    originalBytes = new ArrayBuffer(0);
+  } else {
+    const blob = await loadSourceBlob(file.sourceBlobId!);
+    if (!blob) {
+      throw new Error('无法读取原始文件，请确认本地 DB 服务已启动并重试。');
+    }
+    originalBytes = blob;
+  }
+
+  const merged = await okapiMergeFile(
+    file.name,
+    originalBytes,
+    segmentsToMergePayload(segments),
+    okapiSettings,
+    mergeOptions
+  );
   downloadBytes(merged.bytes, merged.fileName, merged.mime);
   return merged.fileName;
 }
@@ -79,20 +95,35 @@ export async function exportOriginalFormatProjectZip(
     if (!segments?.length) continue;
     if (!canFormatPreservingExport(file)) continue;
 
-    const blob = await loadSourceBlob(file.sourceBlobId!);
-    if (!blob) continue;
-
     const isPptx = getOriginalFormatKind(file.name) === 'pptx';
-    const merged = await okapiMergeFile(file.name, blob, segmentsToMergePayload(segments), okapiSettings, {
+    const mergeOptions = {
       exportFont,
       pptxFontScale: isPptx && pptxFontScale != null ? clampPptxFontScale(pptxFontScale) : undefined,
-    });
+      sourceBlobId: file.sourceBlobId,
+    };
+
+    let originalBytes: ArrayBuffer;
+    if (isCloudDeployment()) {
+      originalBytes = new ArrayBuffer(0);
+    } else {
+      const blob = await loadSourceBlob(file.sourceBlobId!);
+      if (!blob) continue;
+      originalBytes = blob;
+    }
+
+    const merged = await okapiMergeFile(
+      file.name,
+      originalBytes,
+      segmentsToMergePayload(segments),
+      okapiSettings,
+      mergeOptions
+    );
     zip.file(merged.fileName, merged.bytes);
     count += 1;
   }
 
   if (count === 0) {
-    throw new Error('没有可保真导出的文件。请确认文件已重新导入且 Okapi 侧车正在运行。');
+    throw new Error('没有可保真导出的文件。请确认文件已重新导入且 Okapi 服务可用。');
   }
 
   const zipBytes = await zip.generateAsync({ type: 'uint8array' });

@@ -6,8 +6,9 @@ import {
   highlightColorCss,
   metaById,
   parseMarkedParts,
+  stripInlineMarkers,
 } from '../services/inlineFormatting/markerParse';
-import { segmentSourceByTermHits } from '../services/termQaMatch';
+import { collectTermHitSpans, segmentSourceByTermHits } from '../services/termQaMatch';
 
 function runStyleToCss(style: InlineRunStyle | undefined): React.CSSProperties {
   if (!style) return {};
@@ -37,6 +38,17 @@ function runStyleToCss(style: InlineRunStyle | undefined): React.CSSProperties {
   return css;
 }
 
+function termAtPlainOffset(
+  spans: ReturnType<typeof collectTermHitSpans>,
+  plainStart: number,
+  plainEnd: number
+): TermBaseEntry | null {
+  for (const span of spans) {
+    if (plainStart < span.end && plainEnd > span.start) return span.term;
+  }
+  return null;
+}
+
 function renderPlainWithTerms(text: string, terms: TermBaseEntry[], keyPrefix: string): React.ReactNode[] {
   if (!terms.length || !text) return [text];
   const segments = segmentSourceByTermHits(text, terms, false);
@@ -53,6 +65,59 @@ function renderPlainWithTerms(text: string, terms: TermBaseEntry[], keyPrefix: s
       <React.Fragment key={`${keyPrefix}-p-${i}`}>{seg.text}</React.Fragment>
     )
   );
+}
+
+function renderMarkedPartWithTerms(
+  text: string,
+  term: TermBaseEntry | null,
+  key: string,
+  runStyle?: InlineRunStyle,
+  pickable?: boolean,
+  onFormattedRunPick?: (runId: string, style: InlineRunStyle) => void,
+  runId?: string
+): React.ReactNode {
+  const inner = term ? (
+    <span
+      className="bg-yellow-200/50 text-yellow-700 border-b-2 border-yellow-400/50 cursor-help font-medium rounded-[2px] px-0.5 mx-0.5"
+      title={`术语: ${term.source} -> ${term.target}`}
+    >
+      {text}
+    </span>
+  ) : (
+    text
+  );
+
+  if (runStyle !== undefined && runId !== undefined) {
+    return (
+      <span
+        key={key}
+        data-run-id={runId}
+        style={runStyleToCss(runStyle)}
+        className={
+          pickable
+            ? 'cursor-pointer rounded-sm hover:outline hover:outline-2 hover:outline-teal-400/70 hover:outline-offset-1'
+            : undefined
+        }
+        title={pickable ? '点击将此处格式应用到译文选区' : undefined}
+        onMouseDown={(e) => {
+          if (pickable && e.ctrlKey) {
+            e.preventDefault();
+            e.stopPropagation();
+          }
+        }}
+        onClick={(e) => {
+          if (!pickable || !e.ctrlKey || !runStyle) return;
+          e.preventDefault();
+          e.stopPropagation();
+          onFormattedRunPick?.(runId, { ...runStyle, id: runId });
+        }}
+      >
+        {inner}
+      </span>
+    );
+  }
+
+  return <React.Fragment key={key}>{inner}</React.Fragment>;
 }
 
 export type InlineMarkedTextProps = {
@@ -83,14 +148,19 @@ export function InlineMarkedText({
     if (!hasInlineMarkers(text)) {
       return renderPlainWithTerms(text, terms, 'plain');
     }
+
+    const plain = stripInlineMarkers(text);
+    const termSpans = terms.length ? collectTermHitSpans(plain, terms, false) : [];
     const parts = parseMarkedParts(text);
+    let plainCursor = 0;
+
     return parts.map((part, i) => {
       if (part.type === 'plain') {
-        return (
-          <React.Fragment key={`p-${i}`}>
-            {renderPlainWithTerms(part.text, terms, `p-${i}`)}
-          </React.Fragment>
-        );
+        const partStart = plainCursor;
+        const partEnd = plainCursor + part.text.length;
+        plainCursor = partEnd;
+        const term = termAtPlainOffset(termSpans, partStart, partEnd);
+        return renderMarkedPartWithTerms(part.text, term, `p-${i}`);
       }
       if (part.type === 'standalone') {
         return (
@@ -102,34 +172,20 @@ export function InlineMarkedText({
           />
         );
       }
+      const partStart = plainCursor;
+      const partEnd = plainCursor + part.text.length;
+      plainCursor = partEnd;
+      const term = termAtPlainOffset(termSpans, partStart, partEnd);
       const runStyle = meta.get(part.id);
       const pickable = formatPickActive && !!runStyle && !!onFormattedRunPick;
-      return (
-        <span
-          key={`r-${i}`}
-          data-run-id={part.id}
-          style={runStyleToCss(runStyle)}
-          className={
-            pickable
-              ? 'cursor-pointer rounded-sm hover:outline hover:outline-2 hover:outline-teal-400/70 hover:outline-offset-1'
-              : undefined
-          }
-          title={pickable ? '点击将此处格式应用到译文选区' : undefined}
-          onMouseDown={(e) => {
-            if (pickable && e.ctrlKey) {
-              e.preventDefault();
-              e.stopPropagation();
-            }
-          }}
-          onClick={(e) => {
-            if (!pickable || !e.ctrlKey || !runStyle) return;
-            e.preventDefault();
-            e.stopPropagation();
-            onFormattedRunPick(part.id, { ...runStyle, id: part.id });
-          }}
-        >
-          {part.text}
-        </span>
+      return renderMarkedPartWithTerms(
+        part.text,
+        term,
+        `r-${i}`,
+        runStyle,
+        pickable,
+        onFormattedRunPick,
+        part.id
       );
     });
   }, [text, meta, terms, formatPickActive, onFormattedRunPick]);

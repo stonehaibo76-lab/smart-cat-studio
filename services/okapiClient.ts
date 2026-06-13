@@ -1,4 +1,4 @@
-import { getApiBaseUrl, authHeaders } from './authService';
+import { getApiBaseUrl, authHeaders, isAuthRequired } from './authService';
 import type { OkapiSettings } from '../types';
 import type { MonolingualExportFont } from './catInterop/originalFormatExportTypes';
 
@@ -89,6 +89,43 @@ export type OkapiMergeOptions = {
   exportFont?: MonolingualExportFont;
   pptxFontScale?: number;
 };
+
+async function mergeViaServerByBlob(
+  sourceBlobId: string,
+  fileName: string,
+  segments: OkapiMergeSegment[],
+  options?: OkapiMergeOptions
+): Promise<{ fileName: string; bytes: Uint8Array; mime: string }> {
+  const base = getApiBaseUrl();
+  const res = await fetch(`${base}/api/okapi/merge-by-blob`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({
+      sourceBlobId,
+      fileName,
+      segments: buildMergePayload(segments),
+      exportFont: options?.exportFont ?? 'simsun',
+      pptxFontScale: options?.pptxFontScale,
+    }),
+    signal: AbortSignal.timeout(300_000),
+  });
+
+  const { data, parseError } = await readJsonBody<OkapiMergeResult>(res);
+  if (parseError) {
+    throw new Error(parseError);
+  }
+  if (!res.ok || !data?.ok || !data.fileBase64) {
+    throw new Error(data?.error || res.statusText || 'merge failed');
+  }
+  const raw = atob(data.fileBase64);
+  const out = new Uint8Array(raw.length);
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i);
+  return {
+    fileName: data.fileName || fileName,
+    bytes: out,
+    mime: data.mime || 'application/octet-stream',
+  };
+}
 
 async function mergeViaServer(
   fileName: string,
@@ -233,8 +270,23 @@ export async function okapiMergeFile(
   originalBytes: ArrayBuffer,
   segments: OkapiMergeSegment[],
   settings?: OkapiSettings,
-  options?: OkapiMergeOptions
+  options?: OkapiMergeOptions & { sourceBlobId?: string }
 ): Promise<{ fileName: string; bytes: Uint8Array; mime: string }> {
+  if (isAuthRequired() && options?.sourceBlobId) {
+    try {
+      return await mergeViaServerByBlob(options.sourceBlobId, fileName, segments, options);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!/404|not found/i.test(msg)) {
+        throw new Error(
+          msg.includes('Okapi') || msg.includes('merge')
+            ? msg
+            : `云端保真导出失败：${msg}。请确认 API 已部署 Okapi 侧车（/api/okapi/health）。`
+        );
+      }
+    }
+  }
+
   try {
     const viaServer = await mergeViaServer(fileName, originalBytes, segments, settings, options);
     if (viaServer) return viaServer;

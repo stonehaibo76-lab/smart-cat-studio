@@ -1213,10 +1213,6 @@ const App: React.FC = () => {
         return;
       }
 
-      if (isCloudDeployment()) {
-        alert('纯译文（保真）导出需在本地版完成（需 Okapi 侧车）。云端请使用段段/并列对照双语 DOCX，或 Excel / TMX 导出。');
-        return;
-      }
       const okapiSettings: OkapiSettings = DEFAULT_OKAPI_SETTINGS;
       const pptxFontScale = clampPptxFontScale(options.pptxFontScale ?? DEFAULT_PPTX_FONT_SCALE);
       try {

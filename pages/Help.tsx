@@ -267,7 +267,7 @@ const WhatsNewSection = () => {
             </li>
             <li className="flex gap-2">
               <Icons.Check className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
-              <span>导入时自动保存原文件副本；需 <strong className="text-slate-900">Okapi 侧车</strong>（8090）运行。</span>
+              <span>导入时自动保存原文件副本；{cloud ? '云端 API 内置 Okapi，纯译文导出需有原文件备份。' : '纯译文导出需本机 Okapi 侧车（8090）运行。'}</span>
             </li>
           </ul>
         </div>
@@ -282,7 +282,7 @@ const WhatsNewSection = () => {
         </h3>
         <ul className="space-y-2 text-slate-600 text-sm">
           <li>• 支持 run 级样式：加粗、斜体、下划线、删除线、字体颜色、高亮、上标、下标；段落级删除线等也会继承识别。</li>
-          <li>• 导出时选择「原文格式」→ 纯译文（保真）、段段对照或并列对照；双语 DOCX 可在浏览器直接生成，纯译文需 Okapi 侧车。</li>
+          <li>• 导出时选择「原文格式」→ 纯译文（保真）、段段对照或并列对照；双语 DOCX 可在浏览器直接生成；纯译文需导入时已保存原文件备份{cloud ? '（云端由 API 内置 Okapi 处理）' : '（本地需 Okapi 侧车）'}。</li>
           <li>• 多文件打包为 <code className="bg-slate-50 px-1 rounded">项目原文格式导出_…</code> 或 <code className="bg-slate-50 px-1 rounded">项目双语导出_…</code> ZIP。</li>
           <li>• 若提示缺少原文件备份，请重新导入该 DOCX（导入时会自动保存原文件）。详细操作见「翻译编辑 → DOCX 格式保留」。</li>
         </ul>
@@ -615,8 +615,8 @@ const EditorSection = () => (
             <strong className="text-slate-900">导出</strong>
             <ul className="mt-2 space-y-1">
               <li>• 点击右上角「导出」→「原文格式」→ 选择纯译文（保真）、段段对照或并列对照；段段对照可选「原文在上/译文在上」。</li>
-              <li>• 纯译文需在本地版运行 Okapi 侧车（8090）；段段/并列对照双语 DOCX 可在浏览器直接下载。</li>
-              <li>• 若纯译文不可用，请重新导入 DOCX（导入时会保存原文件备份）。</li>
+              <li>• {cloud ? '纯译文（保真）由云端 API 内置 Okapi 处理；' : '纯译文需在本地版运行 Okapi 侧车（8090）；'}段段/并列对照双语 DOCX 可在浏览器直接下载。</li>
+              <li>• 若纯译文不可用，请重新导入文档（导入时会保存原文件备份）。</li>
             </ul>
           </div>
           <div>
@@ -1795,7 +1795,9 @@ const FAQSection = () => {
     },
     {
       question: "如何导出翻译结果？",
-      answer: "在翻译编辑页面点击右上角「导出」：可选 Excel、TMX、原文格式（纯译文 DOCX/PPTX/TXT/HTML，及 DOCX 段段/并列对照）、SDLXLIFF / MQXLIFF / SDLRPX / MQXLZ 等（视项目文件类型而定）。MQXLZ 回传包会将包内 MQXLIFF 写回译文并保留 skeleton.xml，供 memoQ 导入交稿。纯译文在原文件上写回并保留版式，需 Okapi 侧车；双语对照 DOCX 可在浏览器直接生成。可勾选「仅导出已确认句段」。"
+      answer: cloud
+        ? "在翻译编辑页面点击右上角「导出」：可选 Excel、TMX、原文格式（纯译文 DOCX/PPTX/TXT/HTML，及 DOCX 段段/并列对照）、SDLXLIFF / MQXLIFF / SDLRPX / MQXLZ 等（视项目文件类型而定）。MQXLZ 回传包会将包内 MQXLIFF 写回译文并保留 skeleton.xml，供 memoQ 导入交稿。纯译文在原文件上写回并保留版式，需导入时已保存原文件备份，由云端 API 内置 Okapi 处理；双语对照 DOCX 可在浏览器直接生成。可勾选「仅导出已确认句段」。"
+        : "在翻译编辑页面点击右上角「导出」：可选 Excel、TMX、原文格式（纯译文 DOCX/PPTX/TXT/HTML，及 DOCX 段段/并列对照）、SDLXLIFF / MQXLIFF / SDLRPX / MQXLZ 等（视项目文件类型而定）。MQXLZ 回传包会将包内 MQXLIFF 写回译文并保留 skeleton.xml，供 memoQ 导入交稿。纯译文在原文件上写回并保留版式，需 Okapi 侧车；双语对照 DOCX 可在浏览器直接生成。可勾选「仅导出已确认句段」。"
     },
     {
       question: "能否跨项目复用记忆库和术语库？",

@@ -1,10 +1,9 @@
 services:
   - type: web
     name: smart-cat-api
-    runtime: node
+    runtime: docker
     plan: free
-    buildCommand: npm install
-    startCommand: node server/index.mjs
+    dockerfilePath: ./Dockerfile
     healthCheckPath: /api/health
     envVars:
       - key: NODE_ENV
@@ -15,3 +14,5 @@ services:
         generateValue: true
       - key: FRONTEND_URL
         sync: false
+      - key: OKAPI_UPSTREAM_URL
+        value: http://127.0.0.1:8090

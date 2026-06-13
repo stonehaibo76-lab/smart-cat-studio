@@ -278,12 +278,11 @@ export const Layout: React.FC<LayoutProps> = ({
   const canOriginalFormatExport = originalFormatFilesInScope.some((f) =>
     canFormatPreservingExport(f)
   );
-  const showOriginalFormatExportOption =
-    cloud ? docxFilesInScope.length > 0 : originalFormatFilesInScope.length > 0;
+  const showOriginalFormatExportOption = originalFormatFilesInScope.length > 0;
   const showOriginalFormatCloudHint =
-    cloud && originalFormatFilesInScope.length > 0 && docxFilesInScope.length === 0;
+    cloud && originalFormatFilesInScope.length > 0 && !canOriginalFormatExport;
   const showDocxBilingualSubOptions = docxFilesInScope.length > 0;
-  const canMonolingualOriginalExport = !cloud && canOriginalFormatExport;
+  const canMonolingualOriginalExport = canOriginalFormatExport;
   const primaryOriginalFormatKind = resolvePrimaryOriginalFormatKind(originalFormatFilesInScope);
   const hasPptxInExportScope = originalFormatFilesInScope.some(
     (f) => getOriginalFormatKind(f.name) === 'pptx'
@@ -309,9 +308,6 @@ export const Layout: React.FC<LayoutProps> = ({
       } else {
         next.originalDocxMode = 'monolingual';
       }
-      if (cloud && next.originalDocxMode === 'monolingual' && scopeFile && supportsDocxBilingualExport(scopeFile.name)) {
-        next.originalDocxMode = 'interleaved';
-      }
 
       return next;
     });
@@ -331,13 +327,6 @@ export const Layout: React.FC<LayoutProps> = ({
     }
     if (opts.format === 'original' && !showDocxBilingualSubOptions) {
       opts.originalDocxMode = 'monolingual';
-    }
-    if (
-      opts.format === 'original' &&
-      cloud &&
-      (opts.originalDocxMode === 'monolingual' || !showDocxBilingualSubOptions)
-    ) {
-      opts.originalDocxMode = 'interleaved';
     }
     if (
       opts.format === 'original' &&
