@@ -39,8 +39,9 @@ git push -u origin main
 | `FRONTEND_URL` | Vercel 域名（部署前端后填写） |
 | `OKAPI_UPSTREAM_URL` | 可选，默认 `http://127.0.0.1:8090`（容器内 Okapi 地址） |
 
-4. 容器启动：`scripts/render-start.sh` 先后台启动 Okapi（8090），确认健康后再 `exec node server/index.mjs`（Render 通过 Dockerfile `CMD` 配置）。
-5. 验证：
+4. 容器启动：`scripts/render-start.sh` 先后台启动 Okapi（8090），确认健康后再 `exec node server/index.mjs`（Render 通过 Dockerfile `CMD` 或 `render.yaml` 的 `dockerCommand` 配置）。
+5. **Render Dashboard → Settings → Start Command 请留空**（或填 `sh scripts/render-start.sh`）。若写成 `node server/index.mjs`，会跳过 Okapi 启动脚本，导致 `/api/okapi/health` 为 `false`。
+6. 验证：
    - `https://<api>.onrender.com/api/health` 返回 `ok: true, cloudMode: true`
    - `https://<api>.onrender.com/api/okapi/health` 返回 `ok: true, mergeSupported: true`
 
@@ -103,3 +104,16 @@ VITE_API_BASE_URL=http://127.0.0.1:58741 VITE_REQUIRE_AUTH=true npm run dev
 ## 环境变量参考
 
 见 [`.env.example`](.env.example)
+
+## 8. 故障排查：Okapi health 为 false
+
+**日志出现** `No module named uvicorn` **或** `Running 'node server/index.mjs'`（没有 `[render-start]` 行）：
+
+1. Render → **Settings** → **Runtime** 确认为 **Docker**（不是 Native Node）。
+2. **Start Command 留空**，让 `Dockerfile` / `render.yaml` 的 `dockerCommand` 执行 `sh scripts/render-start.sh`。
+3. 环境变量 `SMARTCAT_SPAWN_OKAPI=0`（由 `render-start.sh` 拉起 Okapi，避免 Node 重复 spawn）。
+4. 重新 **Manual Deploy → Clear build cache & deploy**。
+5. 构建日志应出现 `python3 -m uvicorn --version` 与 `okapi main import ok`；运行日志应先有 `[render-start] Okapi ready` 再启动 Node。
+6. 验证：`GET /api/okapi/health` → `{ "ok": true, "mergeSupported": true }`。
+
+若仍失败，查看运行日志中 `[render-start]` / `[okapi-sidecar]` 的 pip 安装输出。

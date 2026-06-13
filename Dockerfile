@@ -28,6 +28,7 @@ RUN chmod +x scripts/render-start.sh
 ENV NODE_ENV=production
 ENV OKAPI_UPSTREAM_URL=http://127.0.0.1:8090
 ENV SMARTCAT_SPAWN_OKAPI=0
+ENV PATH="/usr/local/bin:$PATH"
 
 EXPOSE 10000
 

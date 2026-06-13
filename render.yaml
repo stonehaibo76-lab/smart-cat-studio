@@ -4,6 +4,7 @@ services:
     runtime: docker
     plan: free
     dockerfilePath: ./Dockerfile
+    dockerCommand: sh scripts/render-start.sh
     healthCheckPath: /api/health
     envVars:
       - key: NODE_ENV
@@ -16,3 +17,5 @@ services:
         sync: false
       - key: OKAPI_UPSTREAM_URL
         value: http://127.0.0.1:8090
+      - key: SMARTCAT_SPAWN_OKAPI
+        value: "0"

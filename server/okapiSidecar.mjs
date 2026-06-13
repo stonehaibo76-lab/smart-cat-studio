@@ -1,7 +1,8 @@
 /**
  * Cloud container: spawn Okapi Python sidecar (uvicorn) alongside Node API.
  */
-import { spawn } from 'child_process';
+import { execSync, spawn } from 'child_process';
+import { existsSync } from 'fs';
 import path from 'path';
 
 let proc = null;
@@ -15,25 +16,77 @@ function parseOkapiUrl(raw) {
   };
 }
 
+function pythonHasUvicorn() {
+  const candidates = [
+    process.env.OKAPI_PYTHON?.trim(),
+    '/usr/local/bin/python3',
+    'python3',
+  ].filter(Boolean);
+  for (const py of candidates) {
+    try {
+      execSync(`"${py}" -c "import uvicorn"`, { stdio: 'ignore' });
+      return py;
+    } catch {
+      /* try next */
+    }
+  }
+  return null;
+}
+
+/** Runtime pip install when Render 未走 Docker 构建、或 Start Command 被覆盖时 */
+export function ensureOkapiPythonDeps(projectRoot) {
+  const existing = pythonHasUvicorn();
+  if (existing) return existing;
+
+  const req = path.join(projectRoot, 'scripts', 'okapi-sidecar', 'requirements.txt');
+  console.log('[okapi-sidecar] uvicorn not found, installing Python requirements…');
+  execSync(`pip3 install --break-system-packages --no-cache-dir -r "${req}"`, {
+    stdio: 'inherit',
+    env: { ...process.env, PIP_BREAK_SYSTEM_PACKAGES: '1' },
+  });
+
+  const after = pythonHasUvicorn();
+  if (!after) {
+    throw new Error(
+      'pip install finished but uvicorn still missing. Check Render logs for pip errors.'
+    );
+  }
+  return after;
+}
+
+function resolveUvicornLaunch(okapiDir, host, port) {
+  const appArgs = ['main:app', '--host', host, '--port', String(port)];
+  const uvicornBin = '/usr/local/bin/uvicorn';
+  if (existsSync(uvicornBin)) {
+    return { cmd: uvicornBin, args: appArgs };
+  }
+  const py = pythonHasUvicorn() || 'python3';
+  return { cmd: py, args: ['-m', 'uvicorn', ...appArgs] };
+}
+
 export function startOkapiSidecar(projectRoot) {
   if (started) return proc;
   started = true;
 
   const { host, port } = parseOkapiUrl(process.env.OKAPI_UPSTREAM_URL);
   const okapiDir = path.join(projectRoot, 'scripts', 'okapi-sidecar');
-  const python = process.env.OKAPI_PYTHON?.trim() || 'python3';
 
-  console.log(`[okapi-sidecar] Starting uvicorn at http://${host}:${port} (${python})…`);
+  try {
+    ensureOkapiPythonDeps(projectRoot);
+  } catch (e) {
+    console.error('[okapi-sidecar] Python deps failed:', e);
+    started = false;
+    return null;
+  }
 
-  proc = spawn(
-    python,
-    ['-m', 'uvicorn', 'main:app', '--host', host, '--port', String(port)],
-    {
-      cwd: okapiDir,
-      stdio: 'inherit',
-      env: { ...process.env, OKAPI_PORT: String(port) },
-    }
-  );
+  const { cmd, args } = resolveUvicornLaunch(okapiDir, host, port);
+  console.log(`[okapi-sidecar] Starting ${cmd} ${args.join(' ')} (cwd=${okapiDir})`);
+
+  proc = spawn(cmd, args, {
+    cwd: okapiDir,
+    stdio: 'inherit',
+    env: { ...process.env, OKAPI_PORT: String(port), PATH: `/usr/local/bin:${process.env.PATH || ''}` },
+  });
 
   proc.on('error', (err) => {
     console.error('[okapi-sidecar] spawn error:', err);

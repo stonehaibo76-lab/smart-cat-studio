@@ -6,13 +6,30 @@ OKAPI_PORT="${OKAPI_PORT:-8090}"
 export OKAPI_HOST OKAPI_PORT
 export OKAPI_UPSTREAM_URL="${OKAPI_UPSTREAM_URL:-http://${OKAPI_HOST}:${OKAPI_PORT}}"
 export SMARTCAT_SPAWN_OKAPI=0
+export PATH="/usr/local/bin:$PATH"
 
 echo "[render-start] python3=$(command -v python3 || echo missing)"
-python3 -m uvicorn --version
+echo "[render-start] pip3=$(command -v pip3 || echo missing)"
+
+if ! python3 -c "import uvicorn" 2>/dev/null; then
+  echo "[render-start] uvicorn missing, running pip install…"
+  PIP_BREAK_SYSTEM_PACKAGES=1 pip3 install --no-cache-dir -r /app/scripts/okapi-sidecar/requirements.txt
+fi
+
+if [ -x /usr/local/bin/uvicorn ]; then
+  UVICORN_CMD="/usr/local/bin/uvicorn"
+else
+  UVICORN_CMD="python3 -m uvicorn"
+fi
+$UVICORN_CMD --version
 
 echo "[render-start] Starting Okapi at http://${OKAPI_HOST}:${OKAPI_PORT}"
 cd /app/scripts/okapi-sidecar
-python3 -m uvicorn main:app --host "$OKAPI_HOST" --port "$OKAPI_PORT" &
+if [ -x /usr/local/bin/uvicorn ]; then
+  /usr/local/bin/uvicorn main:app --host "$OKAPI_HOST" --port "$OKAPI_PORT" &
+else
+  python3 -m uvicorn main:app --host "$OKAPI_HOST" --port "$OKAPI_PORT" &
+fi
 okapi_pid=$!
 
 ready=0
