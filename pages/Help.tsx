@@ -1547,9 +1547,18 @@ const SettingsSection = () => {
           <div className="bg-indigo-50 p-4 rounded-lg border border-indigo-200 mt-4">
             <strong className="text-slate-900">机器翻译参考（translators，独立于 AI 引擎）：</strong>
             <p className="text-sm mt-1">
-              在「系统设置 → MT 参考」中启用本地 Python sidecar（默认{' '}
-              <code className="text-xs bg-slate-200 px-1 rounded">http://127.0.0.1:8770</code>
-              ）。单引擎对照在编辑页底部「MT 参考」Tab；多引擎对比在编辑页内全屏弹层（设置中勾选「默认使用多引擎对比」，或底部面板点「多引擎对比…」）。
+              {cloud ? (
+                <>
+                  云端版 API 容器内置 MT 侧车，在「系统设置 → MT 参考」中启用并「测试连接」即可，无需在本机启动
+                  Python。单引擎对照在编辑页底部「MT 参考」Tab；多引擎对比在编辑页内全屏弹层。
+                </>
+              ) : (
+                <>
+                  在「系统设置 → MT 参考」中启用本地 Python sidecar（默认{' '}
+                  <code className="text-xs bg-slate-200 px-1 rounded">http://127.0.0.1:8770</code>
+                  ）。单引擎对照在编辑页底部「MT 参考」Tab；多引擎对比在编辑页内全屏弹层（设置中勾选「默认使用多引擎对比」，或底部面板点「多引擎对比…」）。
+                </>
+              )}
               打开方式：<strong className="text-slate-800">Ctrl+Shift+M</strong>（译文框内也可用）、标题栏「MT 参考」、或勾选设置里的「句段切换时自动查询」后切换句段（对比模式开弹层，单引擎开底部面板）。
               快捷键{' '}
               <kbd className="px-1 py-0.5 bg-white border border-slate-300 rounded text-xs">Ctrl+Shift+M</kbd>

@@ -1,4 +1,6 @@
 import { getApiBaseUrl, authHeaders, isAuthRequired } from './authService';
+import { isCloudDeployment } from './deploymentMode';
+import { loadSourceBlob } from './catInterop/sourceBlobStore';
 import type { OkapiSettings } from '../types';
 import type { MonolingualExportFont } from './catInterop/originalFormatExportTypes';
 
@@ -132,20 +134,26 @@ async function mergeViaServer(
   originalBytes: ArrayBuffer,
   segments: OkapiMergeSegment[],
   settings?: OkapiSettings,
-  options?: OkapiMergeOptions
+  options?: OkapiMergeOptions & { sourceBlobId?: string }
 ): Promise<{ fileName: string; bytes: Uint8Array; mime: string } | null> {
   const base = getApiBaseUrl();
+  const payload: Record<string, unknown> = {
+    fileName,
+    segments: buildMergePayload(segments),
+    serviceUrl: settings?.serviceUrl,
+    exportFont: options?.exportFont ?? 'simsun',
+    pptxFontScale: options?.pptxFontScale,
+  };
+  if (originalBytes.byteLength > 0) {
+    payload.fileBase64 = arrayBufferToBase64(originalBytes);
+  } else if (options?.sourceBlobId?.trim()) {
+    payload.sourceBlobId = options.sourceBlobId.trim();
+  }
+
   const res = await fetch(`${base}/api/okapi/merge`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
-    body: JSON.stringify({
-      fileName,
-      fileBase64: arrayBufferToBase64(originalBytes),
-      segments: buildMergePayload(segments),
-      serviceUrl: settings?.serviceUrl,
-      exportFont: options?.exportFont ?? 'simsun',
-      pptxFontScale: options?.pptxFontScale,
-    }),
+    body: JSON.stringify(payload),
     signal: AbortSignal.timeout(300_000),
   });
 
@@ -272,36 +280,79 @@ export async function okapiMergeFile(
   settings?: OkapiSettings,
   options?: OkapiMergeOptions & { sourceBlobId?: string }
 ): Promise<{ fileName: string; bytes: Uint8Array; mime: string }> {
-  if (isAuthRequired() && options?.sourceBlobId) {
+  const cloud = isCloudDeployment();
+  const sourceBlobId = options?.sourceBlobId?.trim();
+  let bytesForMerge = originalBytes;
+
+  if (cloud) {
+    if (!sourceBlobId) {
+      throw new Error(
+        '该文件缺少原始格式备份，无法保真导出。请重新导入此文档后再导出（导入时会自动保存原文件）。'
+      );
+    }
+
     try {
-      return await mergeViaServerByBlob(options.sourceBlobId, fileName, segments, options);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      if (!/404|not found/i.test(msg)) {
+      return await mergeViaServerByBlob(sourceBlobId, fileName, segments, options);
+    } catch (blobErr) {
+      const blobMsg = blobErr instanceof Error ? blobErr.message : String(blobErr);
+
+      if (blobMsg.includes('原文件备份')) {
+        throw blobErr instanceof Error ? blobErr : new Error(blobMsg);
+      }
+
+      // merge-by-blob 不可用时，从云端拉取原文件再走 /api/okapi/merge（避免发送空 fileBase64）
+      if (/404|not found|merge-by-blob/i.test(blobMsg)) {
+        const remote = await loadSourceBlob(sourceBlobId);
+        if (remote?.byteLength) {
+          bytesForMerge = remote;
+        } else {
+          throw new Error('原文件备份未找到，请重新导入文档后再导出纯译文。');
+        }
+      } else {
         throw new Error(
-          msg.includes('Okapi') || msg.includes('merge')
-            ? msg
-            : `云端保真导出失败：${msg}。请确认 API 已部署 Okapi 侧车（/api/okapi/health）。`
+          blobMsg.includes('Okapi') || blobMsg.includes('merge') || blobMsg.includes('保真')
+            ? blobMsg
+            : `云端保真导出失败：${blobMsg}。请确认 API 已部署 Okapi（/api/okapi/health）。`
         );
       }
+    }
+  } else if (!bytesForMerge.byteLength && sourceBlobId) {
+    const local = await loadSourceBlob(sourceBlobId);
+    if (!local?.byteLength) {
+      throw new Error('无法读取原始文件，请确认本地 DB 服务已启动并重试。');
+    }
+    bytesForMerge = local;
+  }
+
+  if (!bytesForMerge.byteLength) {
+    throw new Error('无法读取原始文件，请重新导入此文档后再导出。');
+  }
+
+  if (isAuthRequired()) {
+    try {
+      const viaServer = await mergeViaServer(
+        fileName,
+        bytesForMerge,
+        segments,
+        settings,
+        options
+      );
+      if (viaServer) return viaServer;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (!/404|not found/i.test(msg)) throw e;
     }
   }
 
   try {
-    const viaServer = await mergeViaServer(fileName, originalBytes, segments, settings, options);
-    if (viaServer) return viaServer;
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    if (!/404|not found/i.test(msg)) throw e;
-  }
-
-  try {
-    return await mergeViaSidecarDirect(fileName, originalBytes, segments, settings, options);
+    return await mergeViaSidecarDirect(fileName, bytesForMerge, segments, settings, options);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     if (/failed to fetch|network|abort/i.test(msg)) {
       throw new Error(
-        '无法连接 Okapi 侧车（8090）。请确认 SmartCAT-Okapi 窗口正在运行，并重启侧车以加载 merge 接口。'
+        cloud
+          ? '无法连接云端 Okapi 服务。请稍后重试或联系管理员检查 /api/okapi/health。'
+          : '无法连接 Okapi 侧车（8090）。请确认 SmartCAT-Okapi 窗口正在运行，并重启侧车以加载 merge 接口。'
       );
     }
     throw e;

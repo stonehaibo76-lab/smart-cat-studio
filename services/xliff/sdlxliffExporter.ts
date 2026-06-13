@@ -8,7 +8,7 @@ export interface SdlExportSegment {
   modified?: boolean;
 }
 
-const TAG_ID = '[A-Za-z0-9_]+';
+const TAG_ID = '[A-Za-z0-9_-]+';
 
 function findMaxLockedId(content: string): number {
   const ids = [...content.matchAll(/\bid="locked(\d+)"/g)].map((m) => parseInt(m[1], 10));

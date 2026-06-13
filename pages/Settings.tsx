@@ -366,25 +366,33 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
     setMtRefLaunchLogs([]);
     setMtRefLaunchProgress(null);
     try {
-      if (isPortablePackage()) {
+      if (isPortablePackage() || cloud) {
         for (let i = 0; i < 24; i++) {
           const r = await checkMtReferenceHealth(mtReferenceSettings);
           if (r.ok) {
             setMtRefLaunchHint(
-              `MT 参考服务已就绪（${mtReferenceSettings.serviceUrl || 'http://127.0.0.1:8770'}）${
-                r.translatorsVersion ? `，translators ${r.translatorsVersion}` : ''
-              }。已勾选「启用机器翻译参考面板」。`
+              cloud
+                ? `云端 MT 参考服务已就绪${
+                    r.translatorsVersion ? `（translators ${r.translatorsVersion}）` : ''
+                  }。已勾选「启用机器翻译参考面板」。`
+                : `MT 参考服务已就绪（${mtReferenceSettings.serviceUrl || 'http://127.0.0.1:8770'}）${
+                    r.translatorsVersion ? `，translators ${r.translatorsVersion}` : ''
+                  }。已勾选「启用机器翻译参考面板」。`
             );
             onUpdateMtReferenceSettings({ ...mtReferenceSettings, enabled: true });
             return;
           }
           if (i === 0) {
-            appendMtRefLog('便携版：正在检测 MT sidecar（8770）…');
+            appendMtRefLog(
+              cloud ? '云端：正在检测 API 内置 MT 服务…' : '便携版：正在检测 MT sidecar（8770）…'
+            );
           }
           await new Promise((resolve) => setTimeout(resolve, 500));
         }
         setMtRefLaunchHint(
-          '无法连接 MT 参考服务（8770）。便携版需双击 Start-SmartCAT.bat 启动，并保持控制台窗口打开；不要只打开浏览器访问页面。若仍失败，请查看控制台是否有 Python/MT 报错。'
+          cloud
+            ? '无法连接云端 MT 参考服务。请确认 API 容器已重新部署且 /api/health 中 mtReference.ok 为 true；若刚部署请等待 1～2 分钟后重试。'
+            : '无法连接 MT 参考服务（8770）。便携版需双击 Start-SmartCAT.bat 启动，并保持控制台窗口打开；不要只打开浏览器访问页面。若仍失败，请查看控制台是否有 Python/MT 报错。'
         );
         return;
       }
@@ -416,6 +424,17 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   };
 
   const ensureMtSidecarForTest = async (): Promise<{ ok: boolean; error?: string }> => {
+    if (cloud) {
+      const viaApi = await checkMtReferenceHealth(mtReferenceSettings);
+      if (viaApi.ok) return { ok: true };
+      return {
+        ok: false,
+        error:
+          viaApi.error ||
+          '云端 MT 参考服务未就绪。请确认 API 已重新部署，或稍后在「检测 MT 服务」重试。',
+      };
+    }
+
     const direct = await checkMtSidecarDirect(mtReferenceSettings);
     if (direct.ok) return { ok: true };
 
@@ -453,10 +472,12 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
   };
 
   const runMtReferenceConnectionTest = async () => {
-    const url = mtReferenceSettings.serviceUrl?.trim();
-    if (!url) {
-      setMtRefTestMsg({ ok: false, text: '请先填写 sidecar 地址' });
-      return;
+    if (!cloud) {
+      const url = mtReferenceSettings.serviceUrl?.trim();
+      if (!url) {
+        setMtRefTestMsg({ ok: false, text: '请先填写 sidecar 地址' });
+        return;
+      }
     }
     setMtRefTesting(true);
     setMtRefTestMsg(null);
@@ -955,16 +976,33 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
             <div>
               <h2 className="text-lg font-bold text-slate-900">机器翻译参考</h2>
               <p className="text-sm text-slate-500">
-                通过本地 Python sidecar 调用{' '}
-                <a
-                  href="https://github.com/UlionTse/translators"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="text-indigo-600 hover:underline"
-                >
-                  translators
-                </a>{' '}
-                库（GPL-3.0），在编辑页对照 Bing / 百度 / DeepL 等结果，仅供参考，不会自动写入译文。
+                {cloud ? (
+                  <>
+                    云端 API 容器内置 Python MT 侧车，调用{' '}
+                    <a
+                      href="https://github.com/UlionTse/translators"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-indigo-600 hover:underline"
+                    >
+                      translators
+                    </a>{' '}
+                    库（GPL-3.0）提供 17 个引擎对照，仅供参考，不会自动写入译文。
+                  </>
+                ) : (
+                  <>
+                    通过本地 Python sidecar 调用{' '}
+                    <a
+                      href="https://github.com/UlionTse/translators"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-indigo-600 hover:underline"
+                    >
+                      translators
+                    </a>{' '}
+                    库（GPL-3.0），在编辑页对照 Bing / 百度 / DeepL 等结果，仅供参考，不会自动写入译文。
+                  </>
+                )}
               </p>
             </div>
           </div>
@@ -972,10 +1010,19 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
           <div className="space-y-5">
             <div className="rounded-xl border border-indigo-200 bg-indigo-50/60 p-4 space-y-3">
               <div className="text-sm font-semibold text-indigo-900">
-                {isPortablePackage() ? 'MT 参考服务（便携版）' : '启动 MT 参考服务'}
+                {cloud
+                  ? 'MT 参考服务（云端内置）'
+                  : isPortablePackage()
+                    ? 'MT 参考服务（便携版）'
+                    : '启动 MT 参考服务'}
               </div>
               <p className="text-xs text-indigo-900/90 leading-relaxed">
-                {isPortablePackage() ? (
+                {cloud ? (
+                  <>
+                    云端版无需在本机启动 Python；API 容器内已运行 MT 侧车（端口 8770）。点击下方「检测 MT
+                    服务」或「测试连接」确认就绪后，勾选「启用机器翻译参考面板」即可在编辑页使用。
+                  </>
+                ) : isPortablePackage() ? (
                   <>
                     便携版在双击 <span className="font-mono">Start-SmartCAT.bat</span>{' '}
                     时会自动启动 MT sidecar（端口 8770）。此处用于检测是否已就绪；若未连接请重新运行启动脚本并保持控制台窗口打开。
@@ -988,7 +1035,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                   </>
                 )}
               </p>
-              {!isPortablePackage() && (
+              {!isPortablePackage() && !cloud && (
               <label className="flex items-start gap-3 cursor-pointer">
                 <input
                   type="checkbox"
@@ -1019,11 +1066,11 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
               >
                 {mtRefLaunchBusy
                   ? '正在检测…'
-                  : isPortablePackage()
+                  : cloud || isPortablePackage()
                     ? '检测 MT 服务'
                     : '启动 MT 参考服务'}
               </button>
-              {!isPortablePackage() && (
+              {!isPortablePackage() && !cloud && (
               <>
               {(mtRefLaunchBusy || mtRefTesting) && mtRefLaunchProgress != null && (
                 <div className="space-y-1">
@@ -1077,18 +1124,25 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
 
             <div>
               <label className="block text-sm font-semibold text-slate-700 mb-2">Sidecar 地址</label>
-              <input
-                type="url"
-                placeholder="http://127.0.0.1:8770"
-                value={mtReferenceSettings.serviceUrl}
-                onChange={(e) =>
-                  onUpdateMtReferenceSettings({ ...mtReferenceSettings, serviceUrl: e.target.value })
-                }
-                disabled={!mtReferenceSettings.enabled}
-                className="w-full px-4 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 outline-none transition-all text-sm font-mono disabled:opacity-50"
-              />
+              {cloud ? (
+                <p className="text-sm text-slate-600 font-mono bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5">
+                  由云端 API 内置（无需配置）
+                </p>
+              ) : (
+                <input
+                  type="url"
+                  placeholder="http://127.0.0.1:8770"
+                  value={mtReferenceSettings.serviceUrl}
+                  onChange={(e) =>
+                    onUpdateMtReferenceSettings({ ...mtReferenceSettings, serviceUrl: e.target.value })
+                  }
+                  disabled={!mtReferenceSettings.enabled}
+                  className="w-full px-4 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 outline-none transition-all text-sm font-mono disabled:opacity-50"
+                />
+              )}
             </div>
 
+            {!cloud && (
             <div>
               <label className="block text-sm font-semibold text-slate-700 mb-2">
                 API Key（可选，与服务端 MT_REF_API_KEY 一致时填写）
@@ -1107,6 +1161,7 @@ export const SettingsPage: React.FC<SettingsPageProps> = ({
                 className="w-full px-4 py-2.5 rounded-xl border border-slate-300 bg-slate-50 focus:bg-white focus:ring-2 focus:ring-indigo-500/20 focus:border-indigo-500 outline-none transition-all text-sm font-mono disabled:opacity-50"
               />
             </div>
+            )}
 
             <div>
               <label className="block text-sm font-semibold text-slate-700 mb-2">默认参考引擎</label>

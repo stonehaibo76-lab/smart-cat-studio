@@ -1,4 +1,4 @@
-const TAG_ID = '[A-Za-z0-9_]+';
+const TAG_ID = '[A-Za-z0-9_-]+';
 const OPEN_RE = new RegExp(`<(${TAG_ID})>`, 'g');
 const CLOSE_RE = new RegExp(`</(${TAG_ID})>`, 'g');
 const STANDALONE_RE = new RegExp(`<(${TAG_ID})/>`, 'g');

@@ -1,4 +1,4 @@
-const TAG_ID = '[A-Za-z0-9_]+';
+const TAG_ID = '[A-Za-z0-9_-]+';
 const PAIRED_TAG_RE = new RegExp(`<(${TAG_ID})>(.*?)</\\1>`, 'gs');
 const STANDALONE_TAG_RE = new RegExp(`<(${TAG_ID})/>`, 'g');
 const TAG_TOKEN_RE = new RegExp(`(<${TAG_ID}>|</${TAG_ID}>|<${TAG_ID}/>)`, 'g');
