@@ -74,6 +74,28 @@ function killPortListeners(port) {
   }
 }
 
+async function waitForJavaOkapiHealth(timeoutMs = 90_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch('http://127.0.0.1:8091/health', { signal: AbortSignal.timeout(2000) });
+      if (!res.ok) continue;
+      const data = await res.json().catch(() => ({}));
+      if (data.status === 'ok' || data.ok) return true;
+    } catch {
+      /* retry */
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  return false;
+}
+
+function resolveJavaCommand(appRoot) {
+  const bundled = path.join(appRoot, 'runtime', 'jre', 'bin', 'java.exe');
+  if (fs.existsSync(bundled)) return bundled;
+  return 'java';
+}
+
 async function waitForOkapiHealth(timeoutMs = 60_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -81,7 +103,7 @@ async function waitForOkapiHealth(timeoutMs = 60_000) {
       const res = await fetch('http://127.0.0.1:8090/health', { signal: AbortSignal.timeout(2000) });
       if (!res.ok) continue;
       const data = await res.json().catch(() => ({}));
-      if (data.ok && data.pptxSupported === true) return true;
+      if (data.ok) return true;
     } catch {
       /* retry */
     }
@@ -92,15 +114,9 @@ async function waitForOkapiHealth(timeoutMs = 60_000) {
 
 function ensureOkapiPythonDeps(okapiDir) {
   const reqFile = path.join(okapiDir, 'requirements.txt');
-  const pptxHandler = path.join(okapiDir, 'pptx_handler.py');
   if (!fs.existsSync(reqFile)) return;
-  if (!fs.existsSync(pptxHandler)) {
-    log('[ERROR] 未找到 pptx_handler.py，PPTX 导入/导出不可用。');
-    process.exit(1);
-  }
 
-  const probeScript =
-    'import fastapi, uvicorn, pptx; from pptx_handler import extract_pptx';
+  const probeScript = 'import fastapi, uvicorn';
   const probe = spawnSync(pythonExe, ['-c', probeScript], {
     cwd: okapiDir,
     stdio: 'ignore',
@@ -108,23 +124,14 @@ function ensureOkapiPythonDeps(okapiDir) {
   });
   if (probe.status === 0) return;
 
-  log('[Okapi] 安装/更新侧车依赖（DOCX/PPTX/HTML/TXT）…');
+  log('[Okapi] 安装/更新侧车依赖（HTML/TXT）…');
   const install = spawnSync(
     pythonExe,
     ['-m', 'pip', 'install', '-r', reqFile, '--no-warn-script-location'],
     { cwd: okapiDir, stdio: 'inherit', windowsHide: true }
   );
   if (install.status !== 0) {
-    log('[ERROR] Okapi 依赖安装失败，PPTX 导入/导出不可用。');
-    process.exit(1);
-  }
-  const recheck = spawnSync(pythonExe, ['-c', probeScript], {
-    cwd: okapiDir,
-    stdio: 'ignore',
-    windowsHide: true,
-  });
-  if (recheck.status !== 0) {
-    log('[ERROR] PPTX 模块校验失败（python-pptx / pptx_handler）。');
+    log('[ERROR] Okapi 依赖安装失败，HTML/TXT 导入/导出不可用。');
     process.exit(1);
   }
 }
@@ -204,9 +211,23 @@ async function main() {
 
   ensureOkapiPythonDeps(okapiDir);
   killPortListeners(8090);
+  killPortListeners(8091);
   await new Promise((r) => setTimeout(r, 1000));
 
-  log('[1/4] 启动 Okapi sidecar (8090, DOCX/PPTX/HTML/TXT)…');
+  const javaJar = path.join(APP_ROOT, 'binaries', 'okapi-java-sidecar', 'okapi-sidecar.jar');
+  if (fs.existsSync(javaJar)) {
+    log('[1/5] 启动 Java Okapi sidecar (8091, DOCX/PPTX/XLSX)…');
+    spawnService(
+      'Okapi-Java',
+      resolveJavaCommand(APP_ROOT),
+      ['-jar', javaJar, '--port=8091'],
+      { cwd: APP_ROOT }
+    );
+  } else {
+    log('[WARN] 未找到 Java Okapi JAR，Office 保真导入/导出不可用。');
+  }
+
+  log('[2/5] 启动 Python Okapi sidecar (8090, HTML/TXT)…');
   spawnService(
     'Okapi',
     pythonExe,
@@ -214,7 +235,7 @@ async function main() {
     { cwd: okapiDir }
   );
 
-  log('[2/4] 启动 MT 参考服务 (8770)…');
+  log('[3/5] 启动 MT 参考服务 (8770)…');
   spawnService(
     'MT',
     pythonExe,
@@ -222,7 +243,7 @@ async function main() {
     { cwd: mtDir, env: { MT_REF_PREACCELERATE: '0' } }
   );
 
-  log('[3/4] 启动 Smart-CAT 主服务 (58741)…');
+  log('[4/5] 启动 Smart-CAT 主服务 (58741)…');
   spawnService('主服务', nodeExe, ['server/index.mjs'], {
     cwd: APP_ROOT,
     env: {
@@ -232,13 +253,24 @@ async function main() {
     },
   });
 
-  process.stdout.write('等待 Okapi 就绪（含 PPTX 支持）…');
+  process.stdout.write('等待 Python Okapi 就绪（HTML/TXT）…');
   const okapiReady = await waitForOkapiHealth();
   log(okapiReady ? ' OK' : ' 超时');
   if (!okapiReady) {
-    log('[ERROR] Okapi 侧车在 60 秒内未就绪或未报告 pptxSupported。请关闭旧 SmartCAT-Okapi 窗口后重试。');
+    log('[ERROR] Python Okapi 侧车在 60 秒内未就绪。请关闭旧 SmartCAT-Okapi 窗口后重试。');
     cleanup();
     process.exit(1);
+  }
+
+  if (fs.existsSync(javaJar)) {
+    process.stdout.write('等待 Java Okapi 就绪（DOCX/PPTX/XLSX）…');
+    const javaReady = await waitForJavaOkapiHealth();
+    log(javaReady ? ' OK' : ' 超时');
+    if (!javaReady) {
+      log('[ERROR] Java Okapi 侧车在 90 秒内未就绪。请运行 scripts/packaging/fetch-jre.ps1 或安装 Java 17+。');
+      cleanup();
+      process.exit(1);
+    }
   }
 
   const checks = [
@@ -257,7 +289,7 @@ async function main() {
     }
   }
 
-  log('[4/4] 打开浏览器…');
+  log('[5/5] 打开浏览器…');
   openBrowser('http://127.0.0.1:58741');
   log('');
   log('Smart-CAT Studio 已运行。关闭此窗口将停止全部服务。');

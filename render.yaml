@@ -17,5 +17,7 @@ services:
         sync: false
       - key: OKAPI_UPSTREAM_URL
         value: http://127.0.0.1:8090
+      - key: OKAPI_JAVA_UPSTREAM_URL
+        value: http://127.0.0.1:8091
       - key: SMARTCAT_SPAWN_OKAPI
         value: "0"

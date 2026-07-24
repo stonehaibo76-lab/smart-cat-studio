@@ -1,22 +1,28 @@
 import React from 'react';
 import { SUPPORTED_LANGUAGES } from '../../../constants';
+import { SegmentationModeField } from '../../SegmentationModeField';
+import type { TranslationSegmentationMode } from '../../../types';
 
 interface BasicInfoStepProps {
   newProjectName: string;
   sourceLang: string;
   targetLang: string;
+  segmentationMode: TranslationSegmentationMode;
   onNameChange: (value: string) => void;
   onSourceLangChange: (value: string) => void;
   onTargetLangChange: (value: string) => void;
+  onSegmentationModeChange: (mode: TranslationSegmentationMode) => void;
 }
 
 export const BasicInfoStep: React.FC<BasicInfoStepProps> = ({
   newProjectName,
   sourceLang,
   targetLang,
+  segmentationMode,
   onNameChange,
   onSourceLangChange,
   onTargetLangChange,
+  onSegmentationModeChange,
 }) => {
   return (
     <div className="space-y-5">
@@ -67,6 +73,12 @@ export const BasicInfoStep: React.FC<BasicInfoStepProps> = ({
           </select>
         </div>
       </div>
+
+      <SegmentationModeField
+        value={segmentationMode}
+        onChange={onSegmentationModeChange}
+        hint="决定导入 TXT / Office 等文件时如何切分句段；XLIFF / CAT 包沿用文件内原有句段。"
+      />
     </div>
   );
 };

@@ -2,9 +2,11 @@ import React, { useRef } from 'react';
 import { Icons } from '../../ui/Icons';
 import type { UploadedFilePayload } from '../../../services/projectCreateService';
 import { countFileSegments } from '../../../services/projectCreateService';
+import type { TranslationSegmentationMode } from '../../../types';
 
 interface FileImportStepProps {
   uploadedFiles: UploadedFilePayload[];
+  segmentationMode: TranslationSegmentationMode;
   isParsing: boolean;
   xliffLanguageHint: { sourceLang: string; targetLang: string; differsFromForm: boolean } | null;
   onFileChange: (files: FileList | null) => void;
@@ -13,6 +15,7 @@ interface FileImportStepProps {
 
 export const FileImportStep: React.FC<FileImportStepProps> = ({
   uploadedFiles,
+  segmentationMode,
   isParsing,
   xliffLanguageHint,
   onFileChange,
@@ -72,7 +75,7 @@ export const FileImportStep: React.FC<FileImportStepProps> = ({
           </span>
           <input
             type="file"
-            accept=".txt,.docx,.pptx,.xlsx,.xls,.html,.htm,.idml,.sdlxliff,.mqxliff,.mqxlz,.sdlppx,.sdlrpx,.xlf"
+            accept=".txt,.docx,.pptx,.xlsx,.html,.htm,.idml,.sdlxliff,.mqxliff,.mqxlz,.sdlppx,.sdlrpx,.xlf"
             ref={fileInputRef}
             onChange={(e) => {
               onFileChange(e.target.files);
@@ -86,7 +89,7 @@ export const FileImportStep: React.FC<FileImportStepProps> = ({
         {uploadedFiles.length > 0 && (
           <div className="mt-3 max-h-48 space-y-2 overflow-y-auto">
             {uploadedFiles.map((f, i) => {
-              const segCount = countFileSegments(f);
+              const segCount = countFileSegments(f, segmentationMode);
               return (
                 <div
                   key={`${f.name}-${i}`}

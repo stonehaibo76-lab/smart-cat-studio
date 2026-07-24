@@ -7,6 +7,7 @@ import {
   getOriginalFormatKind,
   supportsOriginalFormatExport,
   segmentTextForOriginalExport,
+  monoExportBlockedReason,
   type MonolingualExportFont,
   clampPptxFontScale,
 } from './originalFormatExportTypes';
@@ -20,6 +21,7 @@ export {
 function segmentsToMergePayload(segments: Segment[]) {
   return segments.map((seg, index) => ({
     okapiTuId: seg.okapiTuId ?? `p-${index}`,
+    okapiSegmentIndex: seg.okapiSegmentIndex ?? 0,
     id: seg.id,
     source: seg.sourceText,
     target: segmentTextForOriginalExport(seg),
@@ -31,7 +33,8 @@ export async function exportOriginalFormatFile(
   segments: Segment[],
   okapiSettings?: OkapiSettings,
   exportFont?: MonolingualExportFont,
-  pptxFontScale?: number
+  pptxFontScale?: number,
+  langs?: { sourceLang?: string; targetLang?: string }
 ): Promise<string> {
   if (!supportsOriginalFormatExport(file.name)) {
     throw new Error(`不支持导出原文格式：${file.name}`);
@@ -43,11 +46,18 @@ export async function exportOriginalFormatFile(
     );
   }
 
+  const blocked = monoExportBlockedReason(file);
+  if (blocked) {
+    throw new Error(blocked);
+  }
+
   const isPptx = getOriginalFormatKind(file.name) === 'pptx';
   const mergeOptions = {
     exportFont,
     pptxFontScale: isPptx && pptxFontScale != null ? clampPptxFontScale(pptxFontScale) : undefined,
     sourceBlobId: file.sourceBlobId,
+    sourceLang: langs?.sourceLang,
+    targetLang: langs?.targetLang,
   };
 
   let originalBytes: ArrayBuffer;
@@ -83,7 +93,8 @@ export async function exportOriginalFormatProjectZip(
   segmentsByFileId: Map<string, Segment[]>,
   okapiSettings?: OkapiSettings,
   exportFont?: MonolingualExportFont,
-  pptxFontScale?: number
+  pptxFontScale?: number,
+  langs?: { sourceLang?: string; targetLang?: string }
 ): Promise<string> {
   const JSZip = (await import('jszip')).default;
   const zip = new JSZip();
@@ -94,12 +105,16 @@ export async function exportOriginalFormatProjectZip(
     const segments = segmentsByFileId.get(file.id);
     if (!segments?.length) continue;
     if (!canFormatPreservingExport(file)) continue;
+    const blocked = monoExportBlockedReason(file);
+    if (blocked) continue;
 
     const isPptx = getOriginalFormatKind(file.name) === 'pptx';
     const mergeOptions = {
       exportFont,
       pptxFontScale: isPptx && pptxFontScale != null ? clampPptxFontScale(pptxFontScale) : undefined,
       sourceBlobId: file.sourceBlobId,
+      sourceLang: langs?.sourceLang,
+      targetLang: langs?.targetLang,
     };
 
     let originalBytes: ArrayBuffer;

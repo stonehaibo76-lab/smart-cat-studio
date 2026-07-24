@@ -71,14 +71,17 @@ export const ProjectCreateWizard: React.FC<ProjectCreateWizardProps> = ({
               newProjectName={wizard.formState.newProjectName}
               sourceLang={wizard.formState.sourceLang}
               targetLang={wizard.formState.targetLang}
+              segmentationMode={wizard.formState.segmentationMode}
               onNameChange={wizard.setNewProjectName}
               onSourceLangChange={wizard.setSourceLang}
               onTargetLangChange={wizard.setTargetLang}
+              onSegmentationModeChange={wizard.setSegmentationMode}
             />
           )}
           {wizard.currentStep === 1 && (
             <FileImportStep
               uploadedFiles={wizard.formState.uploadedFiles}
+              segmentationMode={wizard.formState.segmentationMode}
               isParsing={wizard.isParsing}
               xliffLanguageHint={wizard.xliffLanguageHint}
               onFileChange={wizard.handleFileChange}

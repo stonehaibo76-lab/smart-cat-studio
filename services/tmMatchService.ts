@@ -104,6 +104,7 @@ export async function searchTmMatches(
     return cached.hits.slice(0, limit);
   }
 
+  let hits: TmMatchHit[] = [];
   try {
     const apiHits = await searchTmMatchesApi({
       tmIds,
@@ -112,19 +113,20 @@ export async function searchTmMatches(
       limit,
       tmNames: Object.fromEntries(tms.map((t) => [t.id, t.name])),
     });
-    if (apiHits.length > 0 || tms.some((t) => t.units.length > 0)) {
-      matchCache.set(key, { hits: apiHits, ts: Date.now() });
-      trimCache();
-      return apiHits;
+    if (apiHits.length > 0) {
+      hits = apiHits;
     }
   } catch {
-    /* fall back to in-memory */
+    /* fall back to in-memory below */
   }
 
-  const mem = searchTmMatchesInMemory(sourceText, tms, minScore, limit);
-  matchCache.set(key, { hits: mem, ts: Date.now() });
+  if (hits.length === 0) {
+    hits = searchTmMatchesInMemory(sourceText, tms, minScore, limit);
+  }
+
+  matchCache.set(key, { hits, ts: Date.now() });
   trimCache();
-  return mem;
+  return hits.slice(0, limit);
 }
 
 /** Prefetch matches for adjacent segments (idle optimization). */

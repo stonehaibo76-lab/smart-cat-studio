@@ -47,6 +47,7 @@ export type ExportOptionsModalFlags = {
   originalFormatFilesInScopeCount: number;
   primaryOriginalFormatKind: OriginalFormatKind | 'mixed' | null;
   hasPptxInExportScope: boolean;
+  showMonolingualFontOptions: boolean;
 };
 
 export type ExportOptionsModalProps = {
@@ -163,6 +164,7 @@ export const ExportOptionsModal: React.FC<ExportOptionsModalProps> = ({
     originalFormatFilesInScopeCount,
     primaryOriginalFormatKind,
     hasPptxInExportScope,
+    showMonolingualFontOptions,
   } = flags;
 
   const isInteropExport =
@@ -403,7 +405,9 @@ export const ExportOptionsModal: React.FC<ExportOptionsModalProps> = ({
                 })()}
               </div>
 
-              {options.originalDocxMode === 'monolingual' && canMonolingualOriginalExport && (
+              {options.originalDocxMode === 'monolingual' &&
+                canMonolingualOriginalExport &&
+                showMonolingualFontOptions && (
                 <div>
                   <label className={labelClass}>导出字体</label>
                   <div className="flex flex-wrap gap-2">
@@ -455,7 +459,7 @@ export const ExportOptionsModal: React.FC<ExportOptionsModalProps> = ({
                     <span>{PPTX_FONT_SCALE_MAX}</span>
                   </div>
                   <p className={hintClass}>
-                    相对原文字号的缩放比例（例如 0.7 表示 70%）。
+                    Java Okapi 写回译文后按此比例缩小字号，缓解中译英出框。默认 70%；标题页可试 50%-70%，正文 70%-85%。
                     {primaryOriginalFormatKind === 'mixed' && ' 仅应用于 PPTX 文件。'}
                   </p>
                 </div>

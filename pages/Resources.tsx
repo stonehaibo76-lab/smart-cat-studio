@@ -6,7 +6,7 @@ import { RegexDictionaryPanel, createEmptyRegexDictionaryBook } from '../compone
 import * as XLSX from 'xlsx';
 import { parseTmxFile } from '../services/tmxImport';
 import { isCloudDeployment } from '../services/deploymentMode';
-import { formatResourceCreatedDateLabel } from '../constants';
+import { formatResourceCreatedDateLabel, SUPPORTED_LANGUAGES } from '../constants';
 
 interface ResourcesProps {
   termBases: TermBase[];

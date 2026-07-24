@@ -3,10 +3,10 @@
 ## 架构
 
 - **前端**：Vercel（静态 SPA）
-- **API**：Render（Docker 单容器：Node.js + Python Okapi 侧车）
+- **API**：Render（Docker 单容器：Node.js + Python Okapi 侧车 + Java Okapi 侧车）
 - **数据库**：Supabase PostgreSQL
 
-云端 API 容器内同时运行 **Okapi 侧车**（`127.0.0.1:8090`），支持 **纯译文（保真）** 原文格式导出（DOCX / PPTX / TXT / HTML）。导入时会自动保存原文件到 `xliff_blobs`；若项目是从本地迁移而来且缺少原文件备份，需在云端重新导入文档后再导出保真译文。
+云端 API 容器内同时运行 **Python Okapi 侧车**（`127.0.0.1:8090`，HTML/TXT）与 **Java Okapi 侧车**（`127.0.0.1:8091`，DOCX/PPTX/XLSX 保真往返）。导入时会自动保存原文件到 `xliff_blobs`；若项目是从本地迁移而来且缺少原文件备份，需在云端重新导入文档后再导出保真译文。
 
 ## 1. 准备 GitHub 仓库
 
@@ -37,13 +37,14 @@ git push -u origin main
 | `JWT_SECRET` | 随机长字符串 |
 | `NODE_ENV` | `production` |
 | `FRONTEND_URL` | Vercel 域名（部署前端后填写） |
-| `OKAPI_UPSTREAM_URL` | 可选，默认 `http://127.0.0.1:8090`（容器内 Okapi 地址） |
+| `OKAPI_UPSTREAM_URL` | 可选，默认 `http://127.0.0.1:8090`（容器内 Python Okapi 地址） |
+| `OKAPI_JAVA_UPSTREAM_URL` | 可选，默认 `http://127.0.0.1:8091`（容器内 Java Okapi 地址，DOCX/PPTX/XLSX 往返） |
 
-4. 容器启动：`scripts/render-start.sh` 先后台启动 Okapi（8090），确认健康后再 `exec node server/index.mjs`（Render 通过 Dockerfile `CMD` 或 `render.yaml` 的 `dockerCommand` 配置）。
+4. 容器启动：`scripts/render-start.sh` 先后台启动 Java Okapi（8091）、Python Okapi（8090），确认健康后再 `exec node server/index.mjs`（Render 通过 Dockerfile `CMD` 或 `render.yaml` 的 `dockerCommand` 配置）。
 5. **Render Dashboard → Settings → Start Command 请留空**（或填 `sh scripts/render-start.sh`）。若写成 `node server/index.mjs`，会跳过 Okapi 启动脚本，导致 `/api/okapi/health` 为 `false`。
 6. 验证：
    - `https://<api>.onrender.com/api/health` 返回 `ok: true, cloudMode: true`
-   - `https://<api>.onrender.com/api/okapi/health` 返回 `ok: true, mergeSupported: true`
+   - `https://<api>.onrender.com/api/okapi/health` 返回 `ok: true, mergeSupported: true, officeOkapiSupported: true`
 
 **资源提示**：Render 免费套餐内存有限，保真 merge 大文件（建议原文件 &lt; 50MB）可能较慢或 OOM；生产环境可考虑升级实例规格。
 

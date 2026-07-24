@@ -2,8 +2,10 @@ import React, { useState, useRef, useEffect, useMemo, useLayoutEffect, useCallba
 import { createPortal } from 'react-dom';
 import { Icons } from '../components/ui/Icons';
 import { ProjectCreateWizard } from '../components/project-wizard/ProjectCreateWizard';
-import { Project, SegmentStatus, MatchType, TermBase, TranslationMemory, ProjectFile, Segment, DuplicateAnalysisResult, GrammarRuleBook, RegexDictionaryBook } from '../types';
+import { Project, SegmentStatus, MatchType, TermBase, TranslationMemory, ProjectFile, Segment, DuplicateAnalysisResult, GrammarRuleBook, RegexDictionaryBook, TranslationSegmentationMode } from '../types';
 import { SUPPORTED_LANGUAGES } from '../constants';
+import { SegmentationModeField } from '../components/SegmentationModeField';
+import { resolveSegmentationMode } from '../services/translationSegmentation';
 import { toDatetimeLocalValue, getProjectDeliveryDueRaw, parseDeliveryDeadline } from '../services/projectDueDate';
 import { parseProjectFile } from '../services/projectCreateService';
 import { countBillableChars, normalizeForMatching } from '../utils/textNormalize';
@@ -22,6 +24,7 @@ const LANG_ZH: Record<string, string> = {
   'es-ES': '西班牙语',
   'de-DE': '德语',
   'ru-RU': '俄语',
+  'uk-UA': '乌克兰语',
   'it-IT': '意大利语',
   'pt-BR': '葡萄牙语',
   'vi-VN': '越南语',
@@ -98,7 +101,8 @@ interface DashboardProps {
     xliffProject?: ParsedXliffProject,
     sourceBlobId?: string,
     docxImportMode?: 'bilingual' | 'monolingual',
-    docxBilingualLayout?: 'table' | 'interleaved'
+    docxBilingualLayout?: 'table' | 'interleaved',
+    importEngine?: 'okapi-java' | 'okapi-python' | 'docx-ts'
   ) => void;
   onDeleteFileFromProject: (projectId: string, fileId: string) => void;
   onDeleteProject: (id: string) => void;
@@ -322,6 +326,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
   const [settingsDeliveryDueAt, setSettingsDeliveryDueAt] = useState('');
   const [settingsProjectCompleted, setSettingsProjectCompleted] = useState(false);
   const [settingsDeliveryReminderEnabled, setSettingsDeliveryReminderEnabled] = useState(true);
+  const [settingsSegmentationMode, setSettingsSegmentationMode] = useState<TranslationSegmentationMode>('sentence');
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('info');
 
   const [isParsing, setIsParsing] = useState(false);
@@ -432,6 +437,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
           );
           setSettingsProjectCompleted(project.isCompleted === true);
           setSettingsDeliveryReminderEnabled(project.deliveryDueReminderEnabled !== false);
+          setSettingsSegmentationMode(resolveSegmentationMode(project.segmentationMode));
 
           setSettingsTab('info');
           setIsSettingsModalOpen(true);
@@ -446,7 +452,12 @@ export const Dashboard: React.FC<DashboardProps> = ({
       setParsingFileName(file.name);
       setIsParsing(true);
       try {
-          const result = await parseProjectFile(file);
+          const project = projects.find((p) => p.id === targetProjectId);
+          const result = await parseProjectFile(file, {
+            sourceLang: project?.sourceLang,
+            targetLang: project?.targetLang,
+            segmentationMode: resolveSegmentationMode(project?.segmentationMode),
+          });
           onAddFileToProject(
             targetProjectId,
             result.name,
@@ -456,11 +467,14 @@ export const Dashboard: React.FC<DashboardProps> = ({
             result.xliffProject,
             result.sourceBlobId,
             result.docxImportMode,
-            result.docxBilingualLayout
+            result.docxBilingualLayout,
+            result.importEngine
           );
           setImportFeedback(`已导入「${result.name}」`);
-      } catch {
-          alert('解析失败');
+      } catch (error) {
+          const message =
+            error instanceof Error ? error.message : '解析失败，请重试';
+          alert(message.trim() || '解析失败');
       } finally {
           setIsParsing(false);
           setParsingFileName(null);
@@ -960,14 +974,18 @@ export const Dashboard: React.FC<DashboardProps> = ({
           return;
       }
 
-      // Combine main + reference IDs
+      // Combine main + reference IDs（主库不得同时作为参考库）
       const allTbIds = new Set<string>();
       if (settingsMainTbId) allTbIds.add(settingsMainTbId);
-      settingsReferenceTbIds.forEach(id => allTbIds.add(id));
+      settingsReferenceTbIds.forEach((id) => {
+          if (id && id !== settingsMainTbId) allTbIds.add(id);
+      });
 
       const allTmIds = new Set<string>();
       if (settingsMainTmId) allTmIds.add(settingsMainTmId);
-      settingsReferenceTmIds.forEach(id => allTmIds.add(id));
+      settingsReferenceTmIds.forEach((id) => {
+          if (id && id !== settingsMainTmId) allTmIds.add(id);
+      });
 
       // Create updated project
       const updatedProject: Project = {
@@ -980,7 +998,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
           mainTmId: settingsMainTmId,
           tmIds: Array.from(allTmIds),
           grammarRuleBookIds: Array.from(settingsGrammarRuleBookIds),
-          regexDictionaryBookIds: Array.from(settingsRegexDictionaryBookIds)
+          regexDictionaryBookIds: Array.from(settingsRegexDictionaryBookIds),
+          segmentationMode: settingsSegmentationMode,
       };
 
       const dueTrim = settingsDeliveryDueAt.trim();
@@ -1312,7 +1331,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                             </span>
                             <input
                                 type="file"
-                                accept=".txt,.docx,.pptx,.xlsx,.xls,.html,.htm,.idml,.sdlxliff,.mqxliff,.mqxlz,.sdlppx,.sdlrpx,.xlf"
+                                accept=".txt,.docx,.pptx,.xlsx,.html,.htm,.idml,.sdlxliff,.mqxliff,.mqxlz,.sdlppx,.sdlrpx,.xlf"
                                 ref={addFileInputRef}
                                 onChange={handleSingleFileAddChange}
                                 className="hidden"
@@ -1808,6 +1827,11 @@ export const Dashboard: React.FC<DashboardProps> = ({
                                       </span>
                                   </span>
                               </label>
+                              <SegmentationModeField
+                                  value={settingsSegmentationMode}
+                                  onChange={setSettingsSegmentationMode}
+                                  hint="仅影响此后向本项目追加导入的文件；已有句段不会自动重新切分。XLIFF / CAT 包沿用文件内句段。"
+                              />
                           </div>
                       )}
 
@@ -1821,7 +1845,18 @@ export const Dashboard: React.FC<DashboardProps> = ({
                                   <label className="block text-xs font-bold text-red-600 mb-2">QA术语库 (唯一)</label>
                                   <select
                                       value={settingsMainTbId}
-                                      onChange={(e) => setSettingsMainTbId(e.target.value)}
+                                      onChange={(e) => {
+                                          const nextMain = e.target.value;
+                                          setSettingsMainTbId(nextMain);
+                                          if (nextMain) {
+                                              setSettingsReferenceTbIds((prev) => {
+                                                  if (!prev.has(nextMain)) return prev;
+                                                  const next = new Set(prev);
+                                                  next.delete(nextMain);
+                                                  return next;
+                                              });
+                                          }
+                                      }}
                                       className="w-full border border-slate-300 rounded-lg p-2.5 bg-white text-sm"
                                   >
                                       <option value="">无 (None)</option>
@@ -1829,34 +1864,40 @@ export const Dashboard: React.FC<DashboardProps> = ({
                                           <option key={tb.id} value={tb.id}>{tb.name}</option>
                                       ))}
                                   </select>
-                                  <p className="text-xs text-slate-400 mt-1">QA检查时仅使用此术语库</p>
+                                  <p className="text-xs text-slate-400 mt-1">QA检查时仅使用此术语库；不可再挂为参考术语库</p>
                               </div>
                               <div>
                                   <label className="block text-xs font-bold text-slate-500 mb-2">参考术语库</label>
                                   <div className="border border-slate-200 rounded-lg bg-white max-h-64 overflow-y-auto">
-                                      {availableTBs.map((tb) => (
-                                          <label key={tb.id} className="flex items-center gap-3 p-3 hover:bg-slate-50 border-b border-slate-100 last:border-b-0 cursor-pointer">
-                                              <input
-                                                  type="checkbox"
-                                                  checked={settingsReferenceTbIds.has(tb.id)}
-                                                  onChange={(e) => {
-                                                      const newSet = new Set(settingsReferenceTbIds);
-                                                      if (e.target.checked) newSet.add(tb.id);
-                                                      else newSet.delete(tb.id);
-                                                      setSettingsReferenceTbIds(newSet);
-                                                  }}
-                                                  className="text-slate-600"
-                                                  disabled={tb.id === settingsMainTbId}
-                                              />
-                                              <div className="flex-1 min-w-0">
-                                                  <div className="text-sm font-medium text-slate-800">{tb.name}</div>
-                                                  <div className="text-xs text-slate-400">{tb.entries.length} 个条目</div>
-                                              </div>
-                                              {tb.id === settingsMainTbId && (
-                                                  <span className="text-xs bg-red-100 text-red-600 px-2 py-1 rounded-full font-medium shrink-0">QA</span>
-                                              )}
-                                          </label>
-                                      ))}
+                                      {availableTBs.filter((tb) => tb.id !== settingsMainTbId).length === 0 ? (
+                                          <div className="p-3 text-xs text-slate-400">暂无其他可挂载的术语库</div>
+                                      ) : (
+                                          availableTBs
+                                              .filter((tb) => tb.id !== settingsMainTbId)
+                                              .map((tb) => (
+                                              <label key={tb.id} className="flex items-center gap-3 p-3 hover:bg-slate-50 border-b border-slate-100 last:border-b-0 cursor-pointer">
+                                                  <input
+                                                      type="checkbox"
+                                                      checked={settingsReferenceTbIds.has(tb.id)}
+                                                      onChange={(e) => {
+                                                          const newSet = new Set(settingsReferenceTbIds);
+                                                          if (e.target.checked) {
+                                                              if (tb.id === settingsMainTbId) return;
+                                                              newSet.add(tb.id);
+                                                          } else {
+                                                              newSet.delete(tb.id);
+                                                          }
+                                                          setSettingsReferenceTbIds(newSet);
+                                                      }}
+                                                      className="text-slate-600"
+                                                  />
+                                                  <div className="flex-1 min-w-0">
+                                                      <div className="text-sm font-medium text-slate-800">{tb.name}</div>
+                                                      <div className="text-xs text-slate-400">{tb.entries.length} 个条目</div>
+                                                  </div>
+                                              </label>
+                                          ))
+                                      )}
                                   </div>
                               </div>
                           </div>
@@ -1872,7 +1913,18 @@ export const Dashboard: React.FC<DashboardProps> = ({
                                   <label className="block text-xs font-bold text-blue-600 mb-2">可更新记忆库</label>
                                   <select
                                       value={settingsMainTmId}
-                                      onChange={(e) => setSettingsMainTmId(e.target.value)}
+                                      onChange={(e) => {
+                                          const nextMain = e.target.value;
+                                          setSettingsMainTmId(nextMain);
+                                          if (nextMain) {
+                                              setSettingsReferenceTmIds((prev) => {
+                                                  if (!prev.has(nextMain)) return prev;
+                                                  const next = new Set(prev);
+                                                  next.delete(nextMain);
+                                                  return next;
+                                              });
+                                          }
+                                      }}
                                       className="w-full border border-slate-300 rounded-lg p-2.5 bg-white text-sm"
                                   >
                                       <option value="">无 (None)</option>
@@ -1880,34 +1932,40 @@ export const Dashboard: React.FC<DashboardProps> = ({
                                           <option key={tm.id} value={tm.id}>{tm.name}</option>
                                       ))}
                                   </select>
-                                  <p className="text-xs text-slate-400 mt-1">翻译过程中会更新此记忆库</p>
+                                  <p className="text-xs text-slate-400 mt-1">翻译过程中会更新此记忆库；不可再挂为参考记忆库</p>
                               </div>
                               <div>
                                   <label className="block text-xs font-bold text-slate-500 mb-2">参考记忆库</label>
                                   <div className="border border-slate-200 rounded-lg bg-white max-h-64 overflow-y-auto">
-                                      {availableTMs.map((tm) => (
-                                          <label key={tm.id} className="flex items-center gap-3 p-3 hover:bg-slate-50 border-b border-slate-100 last:border-b-0 cursor-pointer">
-                                              <input
-                                                  type="checkbox"
-                                                  checked={settingsReferenceTmIds.has(tm.id)}
-                                                  onChange={(e) => {
-                                                      const newSet = new Set(settingsReferenceTmIds);
-                                                      if (e.target.checked) newSet.add(tm.id);
-                                                      else newSet.delete(tm.id);
-                                                      setSettingsReferenceTmIds(newSet);
-                                                  }}
-                                                  className="text-slate-600"
-                                                  disabled={tm.id === settingsMainTmId}
-                                              />
-                                              <div className="flex-1 min-w-0">
-                                                  <div className="text-sm font-medium text-slate-800">{tm.name}</div>
-                                                  <div className="text-xs text-slate-400">{tm.units.length} 个条目</div>
-                                              </div>
-                                              {tm.id === settingsMainTmId && (
-                                                  <span className="text-xs bg-blue-100 text-blue-600 px-2 py-1 rounded-full font-medium shrink-0">可更新</span>
-                                              )}
-                                          </label>
-                                      ))}
+                                      {availableTMs.filter((tm) => tm.id !== settingsMainTmId).length === 0 ? (
+                                          <div className="p-3 text-xs text-slate-400">暂无其他可挂载的记忆库</div>
+                                      ) : (
+                                          availableTMs
+                                              .filter((tm) => tm.id !== settingsMainTmId)
+                                              .map((tm) => (
+                                              <label key={tm.id} className="flex items-center gap-3 p-3 hover:bg-slate-50 border-b border-slate-100 last:border-b-0 cursor-pointer">
+                                                  <input
+                                                      type="checkbox"
+                                                      checked={settingsReferenceTmIds.has(tm.id)}
+                                                      onChange={(e) => {
+                                                          const newSet = new Set(settingsReferenceTmIds);
+                                                          if (e.target.checked) {
+                                                              if (tm.id === settingsMainTmId) return;
+                                                              newSet.add(tm.id);
+                                                          } else {
+                                                              newSet.delete(tm.id);
+                                                          }
+                                                          setSettingsReferenceTmIds(newSet);
+                                                      }}
+                                                      className="text-slate-600"
+                                                  />
+                                                  <div className="flex-1 min-w-0">
+                                                      <div className="text-sm font-medium text-slate-800">{tm.name}</div>
+                                                      <div className="text-xs text-slate-400">{tm.units.length} 个条目</div>
+                                                  </div>
+                                              </label>
+                                          ))
+                                      )}
                                   </div>
                               </div>
                           </div>

@@ -1209,5 +1209,42 @@ async def merge(
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
+@app.post("/postprocess/pptx-font-scale")
+async def postprocess_pptx_font_scale(
+    file: UploadFile = File(...),
+    pptx_font_scale: str = Form(...),
+):
+    name = (file.filename or "merged.pptx").lower()
+    if not name.endswith(".pptx"):
+        return JSONResponse(
+            {"ok": False, "error": "postprocess/pptx-font-scale requires a .pptx file"},
+            status_code=400,
+        )
+    data = await file.read()
+    if not data:
+        return JSONResponse({"ok": False, "error": "empty file"}, status_code=400)
+
+    from pptx_handler import normalize_pptx_font_scale, scale_pptx_fonts
+
+    scale = normalize_pptx_font_scale(pptx_font_scale)
+    if scale is None:
+        return JSONResponse(
+            {"ok": False, "error": "pptx_font_scale must be between 0.1 and 1"},
+            status_code=400,
+        )
+
+    try:
+        merged = scale_pptx_fonts(data, scale)
+        download_name = build_download_name(file.filename or "merged.pptx")
+        mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        return Response(
+            content=merged,
+            media_type=mime,
+            headers=merge_response_headers(download_name),
+        )
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
 if __name__ == "__main__":
     uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="info")

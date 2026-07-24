@@ -1,5 +1,5 @@
 import { getApiBaseUrl, authHeaders, isAuthRequired } from './authService';
-import type { OkapiSettings } from '../types';
+import type { OkapiSettings, TranslationSegmentationMode } from '../types';
 import type { MonolingualExportFont } from './catInterop/originalFormatExportTypes';
 
 const DEFAULT_OKAPI_URL = 'http://127.0.0.1:8090';
@@ -9,6 +9,9 @@ export type OkapiHealthResult = {
   version?: string;
   error?: string;
   mergeSupported?: boolean;
+  xlsxSupported?: boolean;
+  officeOkapiSupported?: boolean;
+  supportedExtensions?: string[];
 };
 
 export type OkapiExtractResult = {
@@ -22,7 +25,14 @@ export type OkapiExtractSegment = {
   source: string;
   target?: string;
   okapiTuId?: string;
+  okapiSegmentIndex?: number;
   inlineRunMeta?: import('../types').InlineRunStyle[];
+};
+
+export type OkapiExtractLangOptions = {
+  sourceLang?: string;
+  targetLang?: string;
+  segmentationMode?: TranslationSegmentationMode;
 };
 
 export function resolveOkapiServiceUrl(settings?: OkapiSettings): string {
@@ -72,6 +82,7 @@ async function readJsonBody<T>(res: Response): Promise<{ data?: T; parseError?: 
 function buildMergePayload(segments: OkapiMergeSegment[]) {
   return segments.map((seg, index) => ({
     okapiTuId: seg.okapiTuId ?? `p-${index}`,
+    okapiSegmentIndex: seg.okapiSegmentIndex ?? 0,
     id: seg.id,
     source: seg.source,
     target: seg.target,
@@ -88,6 +99,8 @@ function arrayBufferToBase64(buf: ArrayBuffer): string {
 export type OkapiMergeOptions = {
   exportFont?: MonolingualExportFont;
   pptxFontScale?: number;
+  sourceLang?: string;
+  targetLang?: string;
 };
 
 async function mergeViaServerByBlob(
@@ -106,6 +119,8 @@ async function mergeViaServerByBlob(
       segments: buildMergePayload(segments),
       exportFont: options?.exportFont ?? 'simsun',
       pptxFontScale: options?.pptxFontScale,
+      sourceLang: options?.sourceLang,
+      targetLang: options?.targetLang,
     }),
     signal: AbortSignal.timeout(300_000),
   });
@@ -145,6 +160,8 @@ async function mergeViaServer(
       serviceUrl: settings?.serviceUrl,
       exportFont: options?.exportFont ?? 'simsun',
       pptxFontScale: options?.pptxFontScale,
+      sourceLang: options?.sourceLang,
+      targetLang: options?.targetLang,
     }),
     signal: AbortSignal.timeout(300_000),
   });
@@ -216,11 +233,21 @@ export async function checkOkapiHealth(settings?: OkapiSettings): Promise<OkapiH
       ? `${base}/api/okapi/health?serviceUrl=${encodeURIComponent(resolveOkapiServiceUrl(settings))}`
       : `${base}/api/okapi/health`;
     const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
-    const { data, parseError } = await readJsonBody<OkapiHealthResult & { error?: string }>(res);
+    const { data, parseError } = await readJsonBody<
+      OkapiHealthResult & { error?: string; javaSidecar?: { ok?: boolean } }
+    >(res);
     if (parseError || !data) {
       return { ok: false, error: parseError || res.statusText };
     }
-    return { ok: Boolean(data.ok), version: data.version, error: data.error, mergeSupported: data.mergeSupported };
+    return {
+      ok: Boolean(data.ok),
+      version: data.version,
+      error: data.error,
+      mergeSupported: data.mergeSupported,
+      xlsxSupported: data.xlsxSupported ?? data.officeOkapiSupported ?? data.javaSidecar?.ok,
+      officeOkapiSupported: data.officeOkapiSupported ?? data.xlsxSupported ?? data.javaSidecar?.ok,
+      supportedExtensions: data.supportedExtensions,
+    };
   } catch (e) {
     return { ok: false, error: String(e instanceof Error ? e.message : e) };
   }
@@ -228,7 +255,8 @@ export async function checkOkapiHealth(settings?: OkapiSettings): Promise<OkapiH
 
 export async function okapiExtractFile(
   file: File,
-  settings?: OkapiSettings
+  settings?: OkapiSettings,
+  langs?: OkapiExtractLangOptions
 ): Promise<OkapiExtractResult> {
   const base = getApiBaseUrl();
   const arrayBuffer = await file.arrayBuffer();
@@ -239,6 +267,9 @@ export async function okapiExtractFile(
       fileName: file.name,
       fileBase64: arrayBufferToBase64(arrayBuffer),
       serviceUrl: settings?.serviceUrl,
+      sourceLang: langs?.sourceLang,
+      targetLang: langs?.targetLang,
+      segmentationMode: langs?.segmentationMode,
     }),
     signal: AbortSignal.timeout(300_000),
   });
@@ -260,6 +291,7 @@ export type OkapiMergeResult = {
 
 export type OkapiMergeSegment = {
   okapiTuId?: string;
+  okapiSegmentIndex?: number;
   id?: string;
   source?: string;
   target?: string;

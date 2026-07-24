@@ -107,13 +107,19 @@ export const TradosResourceTable: React.FC<TradosResourceTableProps> = ({
                     />
                   </td>
                   <td className="px-3 py-2 text-center">
-                    <input
-                      type="checkbox"
-                      checked={isRef}
-                      disabled={refDisabled}
-                      onChange={() => onToggleReference(row.id)}
-                      className={`rounded border-slate-300 ${accent.radio} disabled:opacity-30`}
-                    />
+                    {isMain ? (
+                      <span className="text-xs text-slate-400" title="主库不可同时作为参考库">
+                        —
+                      </span>
+                    ) : (
+                      <input
+                        type="checkbox"
+                        checked={isRef}
+                        disabled={refDisabled}
+                        onChange={() => onToggleReference(row.id)}
+                        className={`rounded border-slate-300 ${accent.radio} disabled:opacity-30`}
+                      />
+                    )}
                   </td>
                   <td className="px-3 py-2">
                     <div className="flex min-w-0 items-center gap-2">

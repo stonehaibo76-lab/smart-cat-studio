@@ -102,6 +102,8 @@ export interface Segment {
   xliffModified?: boolean;
   /** Okapi 侧车 extract 返回的 TU id，merge 时写回 */
   okapiTuId?: string;
+  /** Okapi SRX 子句段在 TU 内的索引（merge 分组用） */
+  okapiSegmentIndex?: number;
   /** DOCX inline run styles keyed by marker id (1, 2, …) */
   inlineRunMeta?: InlineRunStyle[];
 }
@@ -115,13 +117,18 @@ export interface ProjectFile {
     interchangeFormat?: InterchangeFormat;
     /** 文件级 XLIFF 元数据（每文件一个 blob） */
     interchangeMeta?: Omit<XliffInterchangeMeta, 'xliffSegmentId' | 'mqIndex'>;
-    /** 原文文件 blob（docx/pptx/txt/html），用于格式保真 merge 导出 */
+    /** 原文文件 blob（docx/pptx/xlsx/txt/html），用于格式保真 merge 导出 */
     sourceBlobId?: string;
     /** DOCX 导入模式（用于导出面板默认对照样式） */
     docxImportMode?: 'bilingual' | 'monolingual';
     /** 双语 DOCX 导入时的版式：双列表格或交替段落 */
     docxBilingualLayout?: 'table' | 'interleaved';
+    /** 保真 Office 导入引擎：okapi-java = Java Okapi（PPTX/XLSX）；okapi-python = Python DOCX；docx-ts = 双语 CAT DOCX */
+    importEngine?: 'okapi-java' | 'okapi-python' | 'docx-ts';
 }
+
+/** 导入时的句段切分：按句（句末标点/SRX）或按段（段落/文本单元） */
+export type TranslationSegmentationMode = 'sentence' | 'paragraph';
 
 export interface Project {
   id: string;
@@ -157,6 +164,9 @@ export interface Project {
 
   // AI Context
   contextDescription?: string;
+
+  /** 导入文件时的句段切分方式；未设置视为按句翻译 */
+  segmentationMode?: TranslationSegmentationMode;
 
   /** Trados SDLPPX/SDLRPX 包元数据 */
   tradosPackage?: TradosPackageMeta;

@@ -1,33 +1,51 @@
 # Okapi Sidecar (Smart-CAT)
 
-Lightweight Python extract service on `http://127.0.0.1:8090`.
+Two local services support format-preserving import/export:
 
-## Start
+| Port | Runtime | Formats |
+|------|---------|---------|
+| **8090** | Python (uvicorn) | **DOCX**, HTML, TXT |
+| **8091** | Java Okapi (`okapi-sidecar.jar`) | **PPTX, XLSX** (Supervertaler-style `okf_openxml`) |
 
-**随 Smart-CAT 启动（推荐）**：双击项目根目录 `启动Smart CAT Studio V 1.8.1.bat`，会自动打开 Okapi 窗口。
+## Start (local dev)
 
-**单独启动**：
+**Recommended** — main launcher starts both:
+
+```cmd
+启动Smart CAT Studio V 1.8.3.1.bat
+```
+
+Portable package: `runtime/node/node.exe scripts/packaging/smartcat-launcher.mjs`
+
+Or individually:
 
 ```cmd
 scripts\start-okapi-sidecar.cmd
+scripts\start-okapi-java-sidecar.cmd
 ```
 
-由主启动脚本调用时传 `silent` 参数，不阻塞、不 pause：
+Bundled JRE (Windows portable): run `scripts\packaging\fetch-jre.ps1` once to populate `runtime/jre/`.
 
-```cmd
-scripts\start-okapi-sidecar.cmd silent
-```
-
-## Endpoints
+## Endpoints (Python, 8090)
 
 - `GET /health` — service status
-- `POST /extract` — multipart `file` field → `{ ok, segments[] }`
+- `POST /extract` — multipart `file` → `{ ok, segments[] }`
+- `POST /merge` — multipart `file` + `segments_json`
 
-## Supported (fallback without Java Okapi)
+## Endpoints (Java, 8091)
 
-- `.docx` — bilingual table or alternating paragraphs
-- `.html` / `.htm` — text blocks
-- `.txt` — one segment per line
-- `.pptx` — slide shapes, tables, grouped shapes, speaker notes (run-level inlineRunMeta)
+Same paths as Supervertaler Okapi sidecar:
 
-Set `OKAPI_JAR_PATH` to Supervertaler okapi-sidecar JAR for full Okapi Framework support (future).
+- `GET /health` — `{ status: "ok", version: "0.1.7" }`
+- `POST /extract` — multipart `file` + `source_lang`, `target_lang`, `segment`
+- `POST /merge` — multipart `original` + `translations` JSON array
+
+JAR location: `binaries/okapi-java-sidecar/okapi-sidecar.jar` (see that folder's README).
+
+## Node API proxy
+
+The DB server (`58741`) exposes `/api/okapi/*` and routes `.pptx`, `.xlsx` to Java (8091); `.docx`, HTML/TXT to Python (8090).
+
+Health: `GET /api/okapi/health` returns `officeOkapiSupported: true` (and `xlsxSupported: true`) when Java sidecar is up.
+
+Bilingual CAT DOCX (table/interleaved import) still uses browser-side TS parsing; mono Office import/export uses Java Okapi.

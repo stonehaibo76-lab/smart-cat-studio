@@ -53,7 +53,7 @@ if not exist ".venv\Scripts\python.exe" (
 )
 
 echo [Okapi] Starting sidecar at http://127.0.0.1:8090 ^(DOCX/PPTX/HTML/TXT^)
-start "SmartCAT-Okapi V1.8.2" /D "%SVC%" cmd /k ".venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8090"
+start "SmartCAT-Okapi V1.8.3.1" /D "%SVC%" cmd /k ".venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8090"
 goto finish_ok
 
 :finish_fail

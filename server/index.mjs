@@ -13,6 +13,16 @@ import {
   maybeRequireWrite,
 } from './auth.mjs';
 import { startOkapiSidecar, waitForOkapiSidecar } from './okapiSidecar.mjs';
+import {
+  isJavaOfficeOkapiFile,
+  resolveJavaUpstream,
+  getJavaHealth,
+  javaExtract,
+  javaMerge,
+  ensureJavaSidecarReady,
+  startOkapiJavaSidecar,
+  waitForOkapiJavaSidecar,
+} from './okapiJavaSidecar.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.join(__dirname, '..');
@@ -414,6 +424,16 @@ function resolveOkapiUpstream(clientServiceUrl) {
   return assertLocalServiceUrl(String(clientServiceUrl || 'http://127.0.0.1:8090'));
 }
 
+function resolveOkapiJavaUpstream(clientServiceUrl) {
+  if (cloud) {
+    const url = (process.env.OKAPI_JAVA_UPSTREAM_URL || 'http://127.0.0.1:8091').trim();
+    return normalizeServiceBaseUrl(url);
+  }
+  return assertLocalServiceUrl(
+    String(clientServiceUrl || process.env.OKAPI_JAVA_UPSTREAM_URL || 'http://127.0.0.1:8091')
+  );
+}
+
 async function getOkapiHealthSummary() {
   try {
     const upstream = resolveOkapiUpstream();
@@ -422,14 +442,27 @@ async function getOkapiHealthSummary() {
       signal: AbortSignal.timeout(15_000),
     });
     const payload = await healthRes.json().catch(() => ({}));
+    const javaUpstream = resolveOkapiJavaUpstream();
+    const javaHealth = await getJavaHealth(javaUpstream);
     return {
       ok: !!payload.ok,
       version: payload.version,
       error: payload.error,
       mergeSupported: payload.mergeSupported !== false,
+      xlsxSupported: javaHealth.ok,
+      officeOkapiSupported: javaHealth.ok,
+      supportedExtensions: javaHealth.ok ? ['pptx', 'xlsx'] : [],
+      javaSidecar: javaHealth,
     };
   } catch (e) {
-    return { ok: false, error: String(e.message || e), mergeSupported: false };
+    return {
+      ok: false,
+      error: String(e.message || e),
+      mergeSupported: false,
+      xlsxSupported: false,
+      officeOkapiSupported: false,
+      supportedExtensions: [],
+    };
   }
 }
 
@@ -595,6 +628,85 @@ async function okapiMergeBuffer(upstream, fileName, buf, segments, exportFont, p
   };
 }
 
+function parsePptxFontScaleForPostprocess(raw) {
+  if (raw == null || raw === '') return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0.1 || n > 1) return null;
+  if (Math.abs(n - 1) < 1e-9) return null;
+  return Math.round(n * 100) / 100;
+}
+
+async function postprocessPptxFontScale(upstream, fileName, mergedBuf, pptxFontScale) {
+  const scale = parsePptxFontScaleForPostprocess(pptxFontScale);
+  if (!String(fileName || '').toLowerCase().endsWith('.pptx') || scale == null) {
+    return mergedBuf;
+  }
+
+  if (cloud) {
+    const ready = await waitForOkapiSidecar(upstream, 30_000);
+    if (!ready) {
+      const err = new Error(
+        'Python Okapi 侧车未就绪，无法对 PPTX 应用译文字号缩放。请稍后重试或查看 Render 日志。'
+      );
+      err.status = 503;
+      throw err;
+    }
+  }
+
+  const form = new FormData();
+  form.append('file', new Blob([mergedBuf]), fileName);
+  form.append('pptx_font_scale', String(scale));
+
+  const res = await fetch(`${upstream}/postprocess/pptx-font-scale`, {
+    method: 'POST',
+    body: form,
+    signal: AbortSignal.timeout(OKAPI_TIMEOUT_MS),
+  });
+
+  if (!res.ok) {
+    const errPayload = await res.json().catch(async () => ({
+      error: await res.text(),
+    }));
+    const err = new Error(
+      errPayload.error ||
+        `PPTX 字号缩放后处理失败 (HTTP ${res.status})。请确认 Python Okapi 侧车（8090）已启动。`
+    );
+    err.status = res.status;
+    throw err;
+  }
+
+  return Buffer.from(await res.arrayBuffer());
+}
+
+async function javaMergeWithPptxPostprocess(
+  javaUpstream,
+  pythonUpstream,
+  fileName,
+  buf,
+  segments,
+  sourceLang,
+  targetLang,
+  pptxFontScale
+) {
+  const result = await javaMerge(javaUpstream, fileName, buf, segments, sourceLang, targetLang);
+  const scale = parsePptxFontScaleForPostprocess(pptxFontScale);
+  if (!String(fileName || '').toLowerCase().endsWith('.pptx') || scale == null) {
+    return result;
+  }
+
+  const mergedBuf = Buffer.from(result.fileBase64, 'base64');
+  const scaledBuf = await postprocessPptxFontScale(
+    pythonUpstream,
+    result.fileName || fileName,
+    mergedBuf,
+    scale
+  );
+  return {
+    ...result,
+    fileBase64: scaledBuf.toString('base64'),
+  };
+}
+
 app.get('/api/okapi/health', async (req, res) => {
   try {
     const upstream = resolveOkapiUpstream(req.query.serviceUrl);
@@ -624,28 +736,57 @@ app.get('/api/okapi/health', async (req, res) => {
     }
 
     const payload = await healthRes.json().catch(() => ({}));
+    const javaUpstream = resolveOkapiJavaUpstream(req.query.javaServiceUrl);
+    let javaHealth = await getJavaHealth(javaUpstream);
+    if (!javaHealth.ok && cloud && process.env.SMARTCAT_SPAWN_OKAPI !== '0') {
+      startOkapiJavaSidecar(projectRoot);
+      await waitForOkapiJavaSidecar(javaUpstream, 20_000);
+      javaHealth = await getJavaHealth(javaUpstream);
+    }
     res.json({
       ok: !!payload.ok,
       version: payload.version,
       error: payload.error,
       mergeSupported: payload.mergeSupported !== false,
+      xlsxSupported: javaHealth.ok,
+      officeOkapiSupported: javaHealth.ok,
+      supportedExtensions: javaHealth.ok ? ['pptx', 'xlsx'] : [],
+      javaSidecar: javaHealth,
     });
   } catch (e) {
-    res.status(502).json({ ok: false, error: String(e.message || e) });
+    res.status(502).json({
+      ok: false,
+      error: String(e.message || e),
+      xlsxSupported: false,
+      officeOkapiSupported: false,
+      supportedExtensions: [],
+    });
   }
 });
 
 app.post('/api/okapi/extract', maybeRequireAuth, maybeRequireWrite, express.json({ limit: '120mb' }), async (req, res) => {
   try {
     const body = req.body || {};
-    const upstream = resolveOkapiUpstream(body.serviceUrl);
     const fileName = String(body.fileName || 'document');
     const fileBase64 = String(body.fileBase64 || '');
+    const sourceLang = String(body.sourceLang || 'en').split('-')[0];
+    const targetLang = String(body.targetLang || 'zh').split('-')[0];
+    const segmentationMode = body.segmentationMode === 'paragraph' ? 'paragraph' : 'sentence';
     if (!fileBase64) {
       res.status(400).json({ ok: false, error: 'fileBase64 required' });
       return;
     }
     const buf = Buffer.from(fileBase64, 'base64');
+
+    if (isJavaOfficeOkapiFile(fileName)) {
+      const javaUpstream = resolveOkapiJavaUpstream(body.javaServiceUrl);
+      await ensureJavaSidecarReady(projectRoot, javaUpstream);
+      const result = await javaExtract(javaUpstream, fileName, buf, sourceLang, targetLang, segmentationMode);
+      res.json(result);
+      return;
+    }
+
+    const upstream = resolveOkapiUpstream(body.serviceUrl);
     const form = new FormData();
     form.append('file', new Blob([buf]), fileName);
     const extractRes = await fetch(`${upstream}/extract`, {
@@ -670,10 +811,11 @@ app.post('/api/okapi/extract', maybeRequireAuth, maybeRequireWrite, express.json
 app.post('/api/okapi/merge', maybeRequireAuth, maybeRequireWrite, express.json({ limit: '120mb' }), async (req, res) => {
   try {
     const body = req.body || {};
-    const upstream = resolveOkapiUpstream(body.serviceUrl);
     const fileName = String(body.fileName || 'document');
     const fileBase64 = String(body.fileBase64 || '');
     const segments = Array.isArray(body.segments) ? body.segments : [];
+    const sourceLang = String(body.sourceLang || 'en').split('-')[0];
+    const targetLang = String(body.targetLang || 'zh').split('-')[0];
     if (!fileBase64) {
       res.status(400).json({ ok: false, error: 'fileBase64 required' });
       return;
@@ -683,6 +825,26 @@ app.post('/api/okapi/merge', maybeRequireAuth, maybeRequireWrite, express.json({
       return;
     }
     const buf = Buffer.from(fileBase64, 'base64');
+
+    if (isJavaOfficeOkapiFile(fileName)) {
+      const javaUpstream = resolveOkapiJavaUpstream(body.javaServiceUrl);
+      const pythonUpstream = resolveOkapiUpstream(body.serviceUrl);
+      await ensureJavaSidecarReady(projectRoot, javaUpstream);
+      const result = await javaMergeWithPptxPostprocess(
+        javaUpstream,
+        pythonUpstream,
+        fileName,
+        buf,
+        segments,
+        sourceLang,
+        targetLang,
+        body.pptxFontScale
+      );
+      res.json(result);
+      return;
+    }
+
+    const upstream = resolveOkapiUpstream(body.serviceUrl);
     const result = await okapiMergeBuffer(
       upstream,
       fileName,
@@ -717,8 +879,29 @@ app.post('/api/okapi/merge-by-blob', maybeRequireAuth, maybeRequireWrite, expres
       res.status(404).json({ ok: false, error: '原文件备份未找到，请重新导入文档后再导出。' });
       return;
     }
-    const upstream = resolveOkapiUpstream();
     const buf = Buffer.isBuffer(blob) ? blob : Buffer.from(blob);
+    const sourceLang = String(body.sourceLang || 'en').split('-')[0];
+    const targetLang = String(body.targetLang || 'zh').split('-')[0];
+
+    if (isJavaOfficeOkapiFile(fileName)) {
+      const javaUpstream = resolveOkapiJavaUpstream(body.javaServiceUrl);
+      const pythonUpstream = resolveOkapiUpstream(body.serviceUrl);
+      await ensureJavaSidecarReady(projectRoot, javaUpstream);
+      const result = await javaMergeWithPptxPostprocess(
+        javaUpstream,
+        pythonUpstream,
+        fileName,
+        buf,
+        segments,
+        sourceLang,
+        targetLang,
+        body.pptxFontScale
+      );
+      res.json(result);
+      return;
+    }
+
+    const upstream = resolveOkapiUpstream();
     const result = await okapiMergeBuffer(
       upstream,
       fileName,

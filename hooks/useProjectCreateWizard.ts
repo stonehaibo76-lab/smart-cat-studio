@@ -5,6 +5,7 @@ import {
   GrammarRuleBook,
   RegexDictionaryBook,
   Project,
+  TranslationSegmentationMode,
 } from '../types';
 import {
   parseProjectFile,
@@ -13,6 +14,7 @@ import {
   type UploadedFilePayload,
   type ProjectCreateFormState,
 } from '../services/projectCreateService';
+import { DEFAULT_TRANSLATION_SEGMENTATION_MODE } from '../services/translationSegmentation';
 
 export const WIZARD_STEPS = [
   { id: 'basic', label: '基本信息' },
@@ -56,6 +58,14 @@ export function useProjectCreateWizard({
   const [regexDictionaryBookIds, setRegexDictionaryBookIds] = useState<Set<string>>(new Set());
   const [newTmName, setNewTmName] = useState('');
   const [newTbName, setNewTbName] = useState('');
+  const [segmentationMode, setSegmentationModeState] = useState<TranslationSegmentationMode>(
+    DEFAULT_TRANSLATION_SEGMENTATION_MODE
+  );
+
+  const setSegmentationMode = useCallback((mode: TranslationSegmentationMode) => {
+    setSegmentationModeState(mode);
+    setUploadedFiles([]);
+  }, []);
 
   const reset = useCallback(() => {
     setCurrentStep(0);
@@ -72,6 +82,7 @@ export function useProjectCreateWizard({
     setRegexDictionaryBookIds(new Set());
     setNewTmName('');
     setNewTbName('');
+    setSegmentationModeState(DEFAULT_TRANSLATION_SEGMENTATION_MODE);
   }, [availableTMs, availableTBs]);
 
   useEffect(() => {
@@ -92,6 +103,7 @@ export function useProjectCreateWizard({
       regexDictionaryBookIds,
       newTmName,
       newTbName,
+      segmentationMode,
     }),
     [
       newProjectName,
@@ -106,6 +118,7 @@ export function useProjectCreateWizard({
       regexDictionaryBookIds,
       newTmName,
       newTbName,
+      segmentationMode,
     ]
   );
 
@@ -164,16 +177,22 @@ export function useProjectCreateWizard({
       }
       setIsParsing(true);
       try {
-        const results = await Promise.all(Array.from(files).map((file) => parseProjectFile(file)));
+        const results = await Promise.all(
+          Array.from(files).map((file) =>
+            parseProjectFile(file, { sourceLang, targetLang, segmentationMode })
+          )
+        );
         setUploadedFiles((prev) => [...prev, ...results]);
       } catch (error) {
         console.error('File parsing error', error);
-        alert('部分文件解析失败，请重试');
+        const message =
+          error instanceof Error ? error.message : '部分文件解析失败，请重试';
+        alert(message.trim() || '部分文件解析失败，请重试');
       } finally {
         setIsParsing(false);
       }
     },
-    [newProjectName]
+    [newProjectName, sourceLang, targetLang, segmentationMode]
   );
 
   const handleRemoveFile = useCallback((index: number) => {
@@ -206,21 +225,23 @@ export function useProjectCreateWizard({
 
   const toggleRefTm = useCallback((id: string) => {
     setReferenceTmIds((prev) => {
+      if (id === mainTmId) return prev;
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
       return next;
     });
-  }, []);
+  }, [mainTmId]);
 
   const toggleRefTb = useCallback((id: string) => {
     setReferenceTbIds((prev) => {
+      if (id === mainTbId) return prev;
       const next = new Set(prev);
       if (next.has(id)) next.delete(id);
       else next.add(id);
       return next;
     });
-  }, []);
+  }, [mainTbId]);
 
   const toggleGrammarBook = useCallback((id: string) => {
     setGrammarRuleBookIds((prev) => {
@@ -266,6 +287,7 @@ export function useProjectCreateWizard({
     setMainTbId: handleMainTbChange,
     setNewTmName,
     setNewTbName,
+    setSegmentationMode,
     goToStep,
     next,
     prev,

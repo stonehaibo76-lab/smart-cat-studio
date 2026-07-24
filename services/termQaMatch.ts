@@ -91,6 +91,22 @@ export function collectTermHitSpans(
   );
 }
 
+/** 按术语条目去重，保留在原文中首次出现的顺序（术语芯片行用） */
+export function collectUniqueTermHitSpans(
+  sourceText: string,
+  allEntries: TermBaseEntry[],
+  ignoreCase: boolean
+): TermHitSpan[] {
+  const seen = new Set<string>();
+  const out: TermHitSpan[] = [];
+  for (const hit of collectTermHitSpans(sourceText, allEntries, ignoreCase)) {
+    if (seen.has(hit.term.id)) continue;
+    seen.add(hit.term.id);
+    out.push(hit);
+  }
+  return out;
+}
+
 export interface TermHitSegment {
   text: string;
   term: TermBaseEntry | null;

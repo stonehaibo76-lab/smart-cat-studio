@@ -19,6 +19,7 @@ import {
   inferDefaultOriginalDocxMode,
   resolvePrimaryOriginalFormatKind,
   supportsDocxBilingualExport,
+  canJavaOfficeMonoExport,
   type BilingualExportFontPair,
   type BilingualInterleavedOrder,
   type MonolingualExportFont,
@@ -282,8 +283,19 @@ export const Layout: React.FC<LayoutProps> = ({
   const showOriginalFormatCloudHint =
     cloud && originalFormatFilesInScope.length > 0 && !canOriginalFormatExport;
   const showDocxBilingualSubOptions = docxFilesInScope.length > 0;
-  const canMonolingualOriginalExport = canOriginalFormatExport;
   const primaryOriginalFormatKind = resolvePrimaryOriginalFormatKind(originalFormatFilesInScope);
+  const canMonolingualOriginalExport =
+    canOriginalFormatExport &&
+    originalFormatFilesInScope.every((f) => canJavaOfficeMonoExport(f));
+  const showMonolingualFontOptions =
+    primaryOriginalFormatKind === 'html' ||
+    primaryOriginalFormatKind === 'txt' ||
+    primaryOriginalFormatKind === 'docx' ||
+    (primaryOriginalFormatKind === 'mixed' &&
+      originalFormatFilesInScope.some((f) => {
+        const k = getOriginalFormatKind(f.name);
+        return k === 'html' || k === 'txt' || k === 'docx';
+      }));
   const hasPptxInExportScope = originalFormatFilesInScope.some(
     (f) => getOriginalFormatKind(f.name) === 'pptx'
   );
@@ -711,6 +723,7 @@ export const Layout: React.FC<LayoutProps> = ({
           originalFormatFilesInScopeCount: originalFormatFilesInScope.length,
           primaryOriginalFormatKind,
           hasPptxInExportScope,
+          showMonolingualFontOptions,
         }}
       />
     </div>

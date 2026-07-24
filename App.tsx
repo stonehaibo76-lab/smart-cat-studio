@@ -74,6 +74,7 @@ import {
   type AuthUser,
 } from './services/authService';
 import { isCloudDeployment, isMtReferenceSupported } from './services/deploymentMode';
+import { invalidateTmMatchCache } from './services/tmMatchService';
 
 const Resources = lazy(() => import('./pages/Resources').then((m) => ({ default: m.Resources })));
 const Help = lazy(() => import('./pages/Help').then((m) => ({ default: m.Help })));
@@ -273,6 +274,8 @@ const App: React.FC = () => {
   editorResumeByProjectRef.current = editorResumeByProject;
   /** 每次进入翻译编辑页递增，驱动 Editor 在 layout 阶段应用 resume，且不依赖 resumeSegmentId 依赖项误覆盖当前句 */
   const [editorResumeLayoutKey, setEditorResumeLayoutKey] = useState(0);
+  /** 记忆库语料变更（导入/合并等）时递增，驱动编辑器重新做 100% 匹配 */
+  const [tmCorpusRevision, setTmCorpusRevision] = useState(0);
   const currentProjectIdRef = useRef<string | null>(null);
   currentProjectIdRef.current = currentProjectId;
   const [searchQuery, setSearchQuery] = useState('');
@@ -743,11 +746,12 @@ const App: React.FC = () => {
     fileName: string,
     content: string,
     isExcel: boolean = false,
-    excelSegments?: Array<{ source: string; target?: string; okapiTuId?: string; inlineRunMeta?: import('./types').InlineRunStyle[] }>,
+    excelSegments?: Array<{ source: string; target?: string; okapiTuId?: string; okapiSegmentIndex?: number; inlineRunMeta?: import('./types').InlineRunStyle[] }>,
     xliffProject?: ParsedXliffProject,
     sourceBlobId?: string,
     docxImportMode?: 'bilingual' | 'monolingual',
-    docxBilingualLayout?: 'table' | 'interleaved'
+    docxBilingualLayout?: 'table' | 'interleaved',
+    importEngine?: 'okapi-java' | 'okapi-python' | 'docx-ts'
   ) => {
       setProjects(prev => prev.map(p => {
           if (p.id === projectId) {
@@ -811,6 +815,7 @@ const App: React.FC = () => {
                           matchType: MatchType.None,
                           isLocked: isLocked,
                           okapiTuId: item.okapiTuId ?? `p-${index}`,
+                          okapiSegmentIndex: item.okapiSegmentIndex ?? 0,
                           inlineRunMeta: item.inlineRunMeta,
                       };
                   });
@@ -848,6 +853,7 @@ const App: React.FC = () => {
                   sourceBlobId,
                   docxImportMode,
                   docxBilingualLayout,
+                  importEngine,
               };
 
               const updatedFiles = [...p.files, newFile];
@@ -1224,7 +1230,7 @@ const App: React.FC = () => {
               : [];
 
         if (filesToExport.length === 0) {
-          alert('当前文件不支持导出原文格式（仅 .docx / .pptx / .txt / .html）。');
+          alert('当前文件不支持导出原文格式（仅 .docx / .pptx / .xlsx / .txt / .html）。');
           return;
         }
 
@@ -1238,7 +1244,8 @@ const App: React.FC = () => {
             map,
             okapiSettings,
             options.exportFont,
-            pptxFontScale
+            pptxFontScale,
+            { sourceLang: activeProject.sourceLang, targetLang: activeProject.targetLang }
           );
           alert(`已导出 ${filesToExport.length} 个保真原文格式文件：${zipName}`);
           return;
@@ -1250,7 +1257,8 @@ const App: React.FC = () => {
           filterSegments(file.segments),
           okapiSettings,
           options.exportFont,
-          pptxFontScale
+          pptxFontScale,
+          { sourceLang: activeProject.sourceLang, targetLang: activeProject.targetLang }
         );
         alert(`已导出保真原文格式：${outName}`);
       } catch (e) {
@@ -1415,6 +1423,8 @@ const App: React.FC = () => {
 
   const handleImportResource = (type: 'tm' | 'tb', resource: any) => {
       if (type === 'tm') {
+          invalidateTmMatchCache();
+          setTmCorpusRevision((v) => v + 1);
           setTranslationMemories(prev => {
               const existingIndex = prev.findIndex(tm => tm.id === resource.id);
               if (existingIndex >= 0) {
@@ -1572,6 +1582,7 @@ const App: React.FC = () => {
                 auxiliaryTBs={auxiliaryTBs}
                 mainTM={mainTM}
                 auxiliaryTMs={auxiliaryTMs}
+                tmCorpusRevision={tmCorpusRevision}
                 onAddTM={(unit) => activeProject && handleAddToProjectTM(activeProject.id, unit)}
                 onAddTerm={(tbId, term) => handleAddTermToTB(tbId, term)}
                 onUpdateTerm={handleUpdateTermInTB}

@@ -1,4 +1,4 @@
-Smart-CAT Studio V1.8.1 — 便携版使用说明
+Smart-CAT Studio V1.8.3.1 — 便携版使用说明
 ========================================
 
 一、快速开始
@@ -65,4 +65,4 @@ MT 参考侧车使用 translators 库（GPL-3.0），详见 docs\MT-GPL-NOTICE.t
 打包前请关闭「启动Smart CAT Studio」开发窗口（npm run dev / server）。
 若必须重装依赖：npm run build:portable -- --fresh
 
-输出：release\Smart-CAT-Studio-1.8.1-portable-win64.zip
+输出：release\Smart-CAT-Studio-1.8.3.1-portable-win64.zip

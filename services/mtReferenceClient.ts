@@ -43,6 +43,7 @@ export function mapLangForTranslators(code: string, role: 'from' | 'to'): string
   if (c.startsWith('de')) return 'de';
   if (c.startsWith('es')) return 'es';
   if (c.startsWith('ru')) return 'ru';
+  if (c.startsWith('uk')) return 'uk';
   if (c.startsWith('it')) return 'it';
   if (c.startsWith('pt')) return 'pt';
   if (c.startsWith('vi')) return 'vi';

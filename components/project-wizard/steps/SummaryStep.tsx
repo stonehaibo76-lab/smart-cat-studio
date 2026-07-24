@@ -7,6 +7,7 @@ import {
   countFileSegments,
   getEffectiveLanguages,
 } from '../../../services/projectCreateService';
+import { segmentationModeLabel } from '../../../services/translationSegmentation';
 
 interface SummaryStepProps {
   formState: ProjectCreateFormState;
@@ -51,7 +52,7 @@ export const SummaryStep: React.FC<SummaryStepProps> = ({
 }) => {
   const { sourceLang, targetLang } = getEffectiveLanguages(formState);
   const totalSegments = formState.uploadedFiles.reduce((sum, f) => {
-    const n = countFileSegments(f);
+    const n = countFileSegments(f, formState.segmentationMode);
     return sum + (n ?? 0);
   }, 0);
 
@@ -91,13 +92,15 @@ export const SummaryStep: React.FC<SummaryStepProps> = ({
           }
         />
 
+        <SummaryRow label="翻译模式" value={segmentationModeLabel(formState.segmentationMode)} />
+
         <div>
           <p className="mb-2 text-xs font-bold uppercase tracking-wider text-slate-500">
             文件 ({formState.uploadedFiles.length} 个，约 {totalSegments} 句段)
           </p>
           <ul className="max-h-32 space-y-1 overflow-y-auto">
             {formState.uploadedFiles.map((f, i) => {
-              const segCount = countFileSegments(f);
+              const segCount = countFileSegments(f, formState.segmentationMode);
               return (
                 <li
                   key={`${f.name}-${i}`}

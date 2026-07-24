@@ -34,10 +34,13 @@ import {
 } from '../services/findReplaceUtils';
 import {
   segmentSourceByTermHits,
-  termSourceHitsSegment,
   filterTermsMatchingSource,
-  targetContainsTermTranslation,
 } from '../services/termQaMatch';
+import {
+  buildInconsistencyIndex,
+  runLocalQaOnSegment,
+  runLocalQaOnSegments,
+} from '../services/localQaCheck';
 import { translateSegment, runDeepQACheck, polishSegment, extractProjectTerms, TermCandidate, analyzeProjectContext, sendAIChatMessage, getAIReadinessError } from '../services/geminiService';
 import {
   processLearningFeedback,
@@ -61,6 +64,11 @@ import {
   type EditorBottomPanelTab,
 } from '../components/EditorDictionaryPanel';
 import { MtCompareModal } from '../components/MtCompareModal';
+import {
+  BatchSegmentScopeModal,
+  type BatchSegmentOperation,
+  type BatchSegmentScope,
+} from '../components/BatchSegmentScopeModal';
 import { fetchMtReference, fetchMtReferenceCompare, segmentMayHaveInlineTags } from '../services/mtReferenceClient';
 import type { MtCompareResultItem } from '../services/mtReferenceClient';
 import { getAllOnlineDictionaryProviders, type OnlineDictionaryId } from '../services/onlineDictionaryUrls';
@@ -98,6 +106,8 @@ import { sourcesEqual } from '../utils/textNormalize';
 import {
   searchTmMatches,
   prefetchTmMatches,
+  findExactTmMatch,
+  invalidateTmMatchCache,
   type TmMatchHit,
 } from '../services/tmMatchService';
 import {
@@ -116,6 +126,9 @@ function preTranslateStrategyForDeployment(strategy: PreTranslateStrategy): PreT
   if (strategy === 'tmMtLlm') return 'tmLlm';
   return strategy;
 }
+
+/** 会话内已应用的记忆库语料版本，避免每次进入编辑页都重复全量重匹配 */
+let appliedTmCorpusRevision = 0;
 
 function deliveryDueBannerLook(kind: DeliveryDueReminder['kind']) {
   switch (kind) {
@@ -315,6 +328,8 @@ interface EditorProps {
 
   mainTM?: TranslationMemory;
   auxiliaryTMs: TranslationMemory[];
+  /** 记忆库语料导入/合并后递增；用于清空已处理标记并重新做 100% 匹配 */
+  tmCorpusRevision?: number;
 
   onAddTM: (unit: TranslationMemoryUnit) => void;
   onAddTerm: (tbId: string, term: TermBaseEntry) => void;
@@ -531,8 +546,20 @@ const COMPARISON_ACTIVE_ROW_TOP_CONTEXT_PX = 200;
 /** 列表底部留白，避免最后一行 QA 标签被视口底边裁切 */
 const COMPARISON_LIST_BOTTOM_PADDING_PX = 56;
 
-function scrollComparisonListToActiveRow(list: ListImperativeAPI | null, index: number): void {
+/**
+ * @param mode `pin`：跳转/恢复布局时强制置顶并留出上方上下文；
+ *             `ifNeeded`：确认跳下一句等场景，仅在目标行不在视口内时轻量滚动，避免整页抖动。
+ */
+function scrollComparisonListToActiveRow(
+  list: ListImperativeAPI | null,
+  index: number,
+  mode: 'pin' | 'ifNeeded' = 'pin',
+): void {
   if (!list || index < 0) return;
+  if (mode === 'ifNeeded') {
+    list.scrollToRow({ index, align: 'smart', behavior: 'instant' });
+    return;
+  }
   list.scrollToRow({ index, align: 'start', behavior: 'instant' });
   const el = list.element;
   if (!el || COMPARISON_ACTIVE_ROW_TOP_CONTEXT_PX <= 0) return;
@@ -643,15 +670,15 @@ const SegmentSourceEditorComponent = ({
 
     const sourceShellClass =
         layoutVariant === 'stacked'
-            ? 'w-full shrink-0 flex flex-col border-b border-slate-200 relative group/source min-h-[min(26vh,10rem)]'
-            : 'flex-1 border-r border-slate-200 relative group/source flex flex-col min-h-[4rem]';
+            ? 'w-full shrink-0 flex flex-col border-b border-slate-200 relative group/source min-h-[min(26vh,10rem)] min-w-0'
+            : 'flex-1 min-w-0 overflow-hidden border-r border-slate-200 relative group/source flex flex-col min-h-[4rem]';
 
     return (
         <div 
             className={sourceShellClass}
             style={{ backgroundColor: editorTheme.sourceBg }}
         >
-            <div className="flex-1 min-h-0 relative">
+            <div className="flex-1 min-h-0 relative flex flex-col">
             {isEditing ? (
                 <div className="h-full relative">
                     <textarea
@@ -727,53 +754,56 @@ const SegmentSourceEditorComponent = ({
                     </div>
                 </div>
             ) : (
-                <div className="relative h-full group/inner">
-                    <div 
-                        className="p-3 leading-relaxed whitespace-pre-wrap text-slate-900 h-full select-text"
-                        style={{ fontSize: `${editorFontSize}px` }}
-                        onMouseUp={handleMouseUp}
-                    >
-                        {/* Use Highlighting Component here */}
-                        <HighlightedSourceText
-                          text={segment.sourceText}
-                          terms={relevantTerms}
-                          inlineRunMeta={segment.inlineRunMeta}
-                          formatPickActive={formatPickActive}
-                          onFormattedRunPick={onSourceRunFormatPick}
-                        />
+                <>
+                    <div className="relative flex-1 min-h-0 group/inner">
+                        <div 
+                            className="p-3 leading-relaxed whitespace-pre-wrap break-words text-slate-900 min-h-[2.5rem] select-text"
+                            style={{ fontSize: `${editorFontSize}px` }}
+                            onMouseUp={handleMouseUp}
+                        >
+                            {/* Use Highlighting Component here */}
+                            <HighlightedSourceText
+                              text={segment.sourceText}
+                              terms={relevantTerms}
+                              inlineRunMeta={segment.inlineRunMeta}
+                              formatPickActive={formatPickActive}
+                              onFormattedRunPick={onSourceRunFormatPick}
+                            />
+                        </div>
+                        {/* Edit Button - Visible on Hover */}
+                        <button 
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                onEditStart();
+                            }}
+                            className="absolute top-1 right-1 p-1.5 bg-white/90 hover:bg-blue-50 text-slate-400 hover:text-blue-600 rounded border border-slate-200 shadow-sm opacity-0 group-hover/source:opacity-100 transition-all z-10 hover:scale-105"
+                            title="编辑原文"
+                        >
+                            <Icons.Edit className="w-3 h-3" />
+                        </button>
+                        {/* Copy Button - Visible on Hover */}
+                        <button
+                            onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+
+                                copyTextToClipboard(segment.sourceText);
+                            }}
+                            className="absolute top-1 right-10 p-1.5 bg-white/90 hover:bg-blue-50 text-slate-400 hover:text-blue-600 rounded border border-slate-200 shadow-sm opacity-0 group-hover/source:opacity-100 transition-all z-10 hover:scale-105"
+                            title="复制原文到剪贴板"
+                        >
+                            <Icons.Copy className="w-3 h-3" />
+                        </button>
                     </div>
                     {!segment.isLocked && onTermInsert && relevantTerms.length > 0 && (
                         <TermLensRow
                             sourceText={segment.sourceText}
                             terms={relevantTerms}
                             onInsertTarget={onTermInsert}
+                            className="shrink-0 border-t border-slate-200/70 bg-black/[0.02]"
                         />
                     )}
-                    {/* Edit Button - Visible on Hover */}
-                    <button 
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            onEditStart();
-                        }}
-                        className="absolute top-1 right-1 p-1.5 bg-white/90 hover:bg-blue-50 text-slate-400 hover:text-blue-600 rounded border border-slate-200 shadow-sm opacity-0 group-hover/source:opacity-100 transition-all z-10 hover:scale-105"
-                        title="编辑原文"
-                    >
-                        <Icons.Edit className="w-3 h-3" />
-                    </button>
-                    {/* Copy Button - Visible on Hover */}
-                    <button
-                        onClick={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-
-                            copyTextToClipboard(segment.sourceText);
-                        }}
-                        className="absolute top-1 right-10 p-1.5 bg-white/90 hover:bg-blue-50 text-slate-400 hover:text-blue-600 rounded border border-slate-200 shadow-sm opacity-0 group-hover/source:opacity-100 transition-all z-10 hover:scale-105"
-                        title="复制原文到剪贴板"
-                    >
-                        <Icons.Copy className="w-3 h-3" />
-                    </button>
-                </div>
+                </>
             )}
             </div>
             {locationCaption ? (
@@ -880,8 +910,8 @@ const SegmentTargetEditorInner = React.forwardRef<HTMLTextAreaElement, SegmentTa
 
     const targetShellClass =
         layoutVariant === 'stacked'
-            ? 'flex-1 flex flex-col relative group w-full min-h-0'
-            : 'flex-1 flex flex-col relative group h-full';
+            ? 'flex-1 flex flex-col relative group w-full min-h-0 min-w-0'
+            : 'flex-1 min-w-0 overflow-hidden flex flex-col relative group h-full';
 
     const showTargetFloatingBar = isActive || (segment.isLocked && targetHovered);
     /** 锁定但未确认：灰色待定底；锁定且已确认：沿用主题确认色。斜线与锁图标一致，锁定句段始终叠加斜线（含自动沿用后已确认）。 */
@@ -911,7 +941,7 @@ const SegmentTargetEditorInner = React.forwardRef<HTMLTextAreaElement, SegmentTa
                 />
                 {segment.isLocked ? (
                   <div
-                    className="w-full p-3 leading-relaxed overflow-hidden block text-slate-900"
+                    className="w-full p-3 leading-relaxed overflow-hidden break-words block text-slate-900"
                     style={{
                       minHeight: '40px',
                       fontSize: `${editorFontSize}px`,
@@ -925,7 +955,7 @@ const SegmentTargetEditorInner = React.forwardRef<HTMLTextAreaElement, SegmentTa
                     value={segment.targetText}
                     inlineRunMeta={targetMeta}
                     readOnly={false}
-                    className={`w-full p-3 leading-relaxed bg-transparent outline-none overflow-hidden block text-slate-900 ${
+                    className={`w-full p-3 leading-relaxed bg-transparent outline-none overflow-hidden break-words block text-slate-900 ${
                       isActive ? 'ring-1 ring-blue-300/50 rounded-sm' : ''
                     }`}
                     style={{
@@ -944,7 +974,7 @@ const SegmentTargetEditorInner = React.forwardRef<HTMLTextAreaElement, SegmentTa
                 tabIndex={segment.isLocked ? -1 : undefined}
                 readOnly={segment.isLocked}
                 spellCheck={true}
-                className={`w-full p-3 leading-relaxed bg-transparent outline-none resize-none overflow-hidden block ${
+                className={`w-full p-3 leading-relaxed bg-transparent outline-none resize-none overflow-hidden break-words block ${
                     segment.isLocked
                         ? `cursor-not-allowed ${lockedPendingVisual ? 'text-slate-500' : 'text-slate-900'}`
                         : 'text-slate-900'
@@ -1098,7 +1128,7 @@ const SegmentTargetEditor = React.memo(SegmentTargetEditorInner);
 
 /** react-window 对照模式行上下文 */
 type ComparisonVirtualRowCtx = {
-  filteredSegments: Segment[];
+  viewSegments: Segment[];
   project: Project;
   reduceMotion: boolean;
   activeSegmentId: string | null;
@@ -1143,7 +1173,7 @@ function ComparisonVirtualRow({
   ...ctx
 }: RowComponentProps<ComparisonVirtualRowCtx>) {
   const {
-    filteredSegments,
+    viewSegments,
     project,
     reduceMotion,
     activeSegmentId,
@@ -1180,7 +1210,7 @@ function ComparisonVirtualRow({
     activeRowRef,
   } = ctx;
 
-  const seg = filteredSegments[index];
+  const seg = viewSegments[index];
   if (!seg) return null;
 
   const isActive = seg.id === activeSegmentId;
@@ -1192,7 +1222,8 @@ function ComparisonVirtualRow({
   const showSourceLocationCaption =
     textSearchScope === 'project' && Boolean(textSearchQuery.trim()) && Boolean(locationLabel);
   const rowMinH = 'min-h-[4rem]';
-  const motionCls = reduceMotion ? '' : 'transition-all duration-75';
+  // 避免 transition-all 在确认/切句时动画 ring、阴影、布局，造成「刷新感」
+  const motionCls = reduceMotion ? '' : 'transition-colors duration-75';
   const chkAnim = reduceMotion ? '' : 'animate-in zoom-in-50 duration-200';
   const formatPickActive =
     isActive &&
@@ -1206,7 +1237,7 @@ function ComparisonVirtualRow({
       style={style}
       ref={isActive ? activeRowRef : undefined}
       onClick={(e) => handleRowClick(e, seg.id)}
-      className={`group flex ${rowMinH} border-b border-slate-200 ${motionCls} scroll-mt-20 select-none ${
+      className={`group flex w-full min-w-0 overflow-hidden ${rowMinH} border-b border-slate-200 ${motionCls} scroll-mt-20 select-none ${
         isActive ? 'ring-2 ring-blue-500 relative z-10 shadow-lg' : 'hover:bg-slate-100/50'
       } ${isSelected && !isActive ? 'bg-blue-50/80 border-blue-200' : ''}`}
     >
@@ -1260,7 +1291,7 @@ function ComparisonVirtualRow({
         }
       />
 
-      <div className="w-20 shrink-0 bg-slate-50 border-r border-slate-200 flex flex-col items-center justify-center gap-1.5 select-none">
+      <div className="w-20 shrink-0 grow-0 basis-20 relative z-[1] bg-slate-50 border-r border-slate-200 flex flex-col items-center justify-center gap-1.5 select-none">
         {matchLabel && (
           <span className="text-[10px] font-bold text-slate-600 bg-white px-1.5 py-0.5 rounded border border-slate-200 shadow-sm">
             {matchLabel}
@@ -1298,12 +1329,103 @@ function ComparisonVirtualRow({
 
 type SortMode = 'natural' | 'status' | 'matchDesc' | 'matchAsc' | 'sourceAsc' | 'sourceDesc' | 'lengthAsc' | 'lengthDesc';
 
+function segmentMatchesEditorFilter(
+  s: Segment,
+  filterStatus: string,
+  textSearchQuery: string,
+  textSearchMode: 'source' | 'target',
+  textSearchCaseSensitive: boolean,
+): boolean {
+  let statusMatch = true;
+  if (filterStatus === 'Locked') {
+    statusMatch = s.isLocked === true;
+  } else if (filterStatus === 'Unlocked') {
+    statusMatch = !s.isLocked;
+  } else if (filterStatus === 'Unlocked+Unconfirmed') {
+    statusMatch = !s.isLocked && s.status !== SegmentStatus.Confirmed;
+  } else if (filterStatus === 'Unconfirmed') {
+    statusMatch = !segmentIsEffectivelyConfirmed(s);
+  } else if (filterStatus === 'Confirmed') {
+    statusMatch = segmentIsEffectivelyConfirmed(s);
+  } else if (filterStatus === 'ExactMatch') {
+    statusMatch = s.matchType === MatchType.Exact;
+  } else if (filterStatus === 'FuzzyMatch') {
+    statusMatch = s.matchType === MatchType.Fuzzy;
+  } else if (filterStatus === 'AITranslation') {
+    statusMatch = s.matchType === MatchType.AI;
+  } else if (filterStatus === 'Translated+Draft') {
+    statusMatch = s.status === SegmentStatus.Translated || s.status === SegmentStatus.Draft;
+  } else if (filterStatus === 'HasQAIssues') {
+    statusMatch = (s.qaIssues?.length || 0) > 0;
+  } else if (filterStatus !== 'All') {
+    statusMatch = s.status === filterStatus;
+  }
+
+  if (!textSearchQuery.trim()) return statusMatch;
+
+  const target = textSearchMode === 'source' ? s.sourceText : s.targetText;
+  if (textSearchCaseSensitive) {
+    return statusMatch && target.includes(textSearchQuery);
+  }
+  const query = textSearchQuery.toLowerCase();
+  return statusMatch && target.toLowerCase().includes(query);
+}
+
+function sortEditorSegments(segments: Segment[], sortMode: SortMode, sourceLang: string): Segment[] {
+  if (sortMode === 'natural') return segments;
+  return [...segments].sort((a, b) => {
+    if (sortMode === 'status') {
+      const statusWeight: Record<SegmentStatus, number> = {
+        [SegmentStatus.NotStarted]: 0,
+        [SegmentStatus.Draft]: 1,
+        [SegmentStatus.PreTranslated]: 2,
+        [SegmentStatus.Translated]: 3,
+        [SegmentStatus.Review]: 4,
+        [SegmentStatus.Proofread]: 5,
+        [SegmentStatus.Confirmed]: 6,
+        [SegmentStatus.Approved]: 7,
+        [SegmentStatus.Rejected]: 8,
+      };
+      return statusWeight[a.status] - statusWeight[b.status];
+    }
+    if (sortMode === 'matchDesc') return (b.matchScore || 0) - (a.matchScore || 0);
+    if (sortMode === 'matchAsc') return (a.matchScore || 0) - (b.matchScore || 0);
+    if (sortMode === 'sourceAsc') return a.sourceText.localeCompare(b.sourceText, sourceLang);
+    if (sortMode === 'sourceDesc') return b.sourceText.localeCompare(a.sourceText, sourceLang);
+    if (sortMode === 'lengthAsc') return a.sourceText.length - b.sourceText.length;
+    if (sortMode === 'lengthDesc') return b.sourceText.length - a.sourceText.length;
+    return 0;
+  });
+}
+
+function computeEditorFilterSnapshotIds(
+  allSegments: Segment[],
+  filterStatus: string,
+  textSearchQuery: string,
+  textSearchMode: 'source' | 'target',
+  textSearchCaseSensitive: boolean,
+  sortMode: SortMode,
+  sourceLang: string,
+): string[] {
+  const matched = allSegments.filter((s) =>
+    segmentMatchesEditorFilter(
+      s,
+      filterStatus,
+      textSearchQuery,
+      textSearchMode,
+      textSearchCaseSensitive,
+    ),
+  );
+  return sortEditorSegments(matched, sortMode, sourceLang).map((s) => s.id);
+}
+
 export const Editor: React.FC<EditorProps> = ({ 
     project, activeFileId, onActiveFileChange,
     onUpdateFileSegments,
     onUpdateMultipleFileSegments,
     mainTB, auxiliaryTBs,
-    mainTM, auxiliaryTMs, 
+    mainTM, auxiliaryTMs,
+    tmCorpusRevision = 0,
     onAddTM, onAddTerm, onUpdateTerm, onDeleteTerm,
     editorTheme, onUpdateEditorTheme,
     editorFontSize, onUpdateEditorFontSize,
@@ -1426,6 +1548,7 @@ export const Editor: React.FC<EditorProps> = ({
   const [textSearchQuery, setTextSearchQuery] = useState('');
   const [textSearchMode, setTextSearchMode] = useState<'source' | 'target'>('source');
   const [textSearchScope, setTextSearchScope] = useState<'file' | 'project'>('file');
+  const [textSearchCaseSensitive, setTextSearchCaseSensitive] = useState(false);
   const textSearchInputRef = useRef<HTMLInputElement>(null);
 
   const applyTextSearch = useCallback(() => {
@@ -1553,9 +1676,22 @@ export const Editor: React.FC<EditorProps> = ({
   const [isAiProcessing, setIsAiProcessing] = useState(false);
   /** 底部多选浮动条「批量翻译」进行中，与单句 isAiProcessing 分离以免互相禁用 */
   const [isSelectionBatchTranslating, setIsSelectionBatchTranslating] = useState(false);
+  /** 多选批量操作：确认弹窗（应用范围：勾选 / 当前筛选 / 全部） */
+  const [batchScopeModal, setBatchScopeModal] = useState<{
+    operation: BatchSegmentOperation;
+  } | null>(null);
   const [isPolishing, setIsPolishing] = useState(false);
   const [isDeepQAProcessing, setIsDeepQAProcessing] = useState(false);
+  const [isLocalQAProcessing, setIsLocalQAProcessing] = useState(false);
+  const [localQaProgress, setLocalQaProgress] = useState({ current: 0, total: 0 });
+  const localQaAbortRef = useRef<AbortController | null>(null);
   const activeRowRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+      return () => {
+          localQaAbortRef.current?.abort();
+      };
+  }, []);
 
   // Text Selection Tracking for Replacement and Concordance
   const [textSelection, setTextSelection] = useState<{start: number, end: number}>({ start: 0, end: 0 });
@@ -2004,6 +2140,53 @@ export const Editor: React.FC<EditorProps> = ({
       return tbs;
   }, [mainTB, auxiliaryTBs]);
 
+  // 记忆库语料更新后：清缓存、放开已处理标记，并对项目内空译文句段重新做 100% 匹配
+  useEffect(() => {
+      if (!tmCorpusRevision || tmCorpusRevision === appliedTmCorpusRevision) {
+          return;
+      }
+      appliedTmCorpusRevision = tmCorpusRevision;
+      if (!project || allTMs.length === 0) {
+          setProcessedSegmentIds(new Set());
+          invalidateTmMatchCache();
+          return;
+      }
+
+      invalidateTmMatchCache();
+      setProcessedSegmentIds(new Set());
+
+      const updates: { fileId: string; segments: Segment[] }[] = [];
+      const filledIds = new Set<string>();
+
+      for (const file of project.files) {
+          let changed = false;
+          const nextSegments = file.segments.map((seg) => {
+              if (seg.targetText?.trim()) return seg;
+              const exactMatch = findExactTmMatch(seg.sourceText, allTMs);
+              if (!exactMatch) return seg;
+              changed = true;
+              filledIds.add(seg.id);
+              return applyTagFormatQaToSegment(
+                  {
+                      ...seg,
+                      targetText: exactMatch.target,
+                      status: SegmentStatus.PreTranslated,
+                      matchType: MatchType.Exact,
+                      matchScore: 100,
+                  },
+                  file,
+                  exactMatch.target
+              );
+          });
+          if (changed) updates.push({ fileId: file.id, segments: nextSegments });
+      }
+
+      if (updates.length > 0) {
+          onUpdateMultipleFileSegments(updates);
+          setProcessedSegmentIds(filledIds);
+      }
+  }, [tmCorpusRevision, project, allTMs, onUpdateMultipleFileSegments]);
+
   const allTerms = useMemo(
       () => allTBs.flatMap(tb => tb.entries.map(e => ({ ...e, tbId: tb.id, tbName: tb.name }))),
       [allTBs]
@@ -2121,7 +2304,7 @@ export const Editor: React.FC<EditorProps> = ({
   };
 
   // TM matches loaded via indexed search API (fallback in-memory)
-  // state: tmMatches — populated in effect after filteredSegments
+  // state: tmMatches — populated in effect after viewSegments
 
   // --- Auto-fill Logic for 100% Matches ---
   useEffect(() => {
@@ -2288,7 +2471,12 @@ export const Editor: React.FC<EditorProps> = ({
   }, [activeSegmentId, activeFile, findSegmentLocation, onUpdateFileSegments]);
 
   useEffect(() => {
-    if (activeSegmentId && activeRowRef.current) {
+    // 对照模式由 scrollComparisonListToActiveRow 负责定位；此处 scrollIntoView 会与列表滚动叠加导致抖动
+    if (
+      editorLayoutMode === 'focus' &&
+      activeSegmentId &&
+      activeRowRef.current
+    ) {
         activeRowRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
     setActiveTermSource(null);
@@ -2301,7 +2489,7 @@ export const Editor: React.FC<EditorProps> = ({
     );
     // Switch back to Matches tab when changing segment, standard behavior unless pinned
     // setActiveSidebarTab('matches'); 
-  }, [activeSegmentId]);
+  }, [activeSegmentId, editorLayoutMode]);
 
 
 
@@ -2344,101 +2532,102 @@ export const Editor: React.FC<EditorProps> = ({
     };
   }, [isResizing, isResizingVertical]);
 
-  // --- Filtering & Sorting Logic ---
-  const filteredSegments = useMemo(() => {
-      // Check if activeFile is null
-      if (!activeFile) return [];
-      
-      // Get all segments based on search scope
-      let allSegments = textSearchScope === 'project' 
-          ? project.files.flatMap(file => file.segments) 
-          : activeFile.segments;
-      
-      let result = allSegments.filter(s => {
-          let statusMatch = true;
-          if (filterStatus === 'Locked') {
-              statusMatch = s.isLocked === true;
-          } else if (filterStatus === 'Unlocked') {
-              statusMatch = !s.isLocked;
-          } else if (filterStatus === 'Unlocked+Unconfirmed') {
-              statusMatch = !s.isLocked && s.status !== SegmentStatus.Confirmed;
-          } else if (filterStatus === 'Unconfirmed') {
-              statusMatch = !segmentIsEffectivelyConfirmed(s);
-          } else if (filterStatus === 'Confirmed') {
-              statusMatch = segmentIsEffectivelyConfirmed(s);
-          } else if (filterStatus === 'ExactMatch') {
-              statusMatch = s.matchType === MatchType.Exact;
-          } else if (filterStatus === 'FuzzyMatch') {
-              statusMatch = s.matchType === MatchType.Fuzzy;
-          } else if (filterStatus === 'AITranslation') {
-              statusMatch = s.matchType === MatchType.AI;
-          } else if (filterStatus === 'Translated+Draft') {
-              statusMatch = s.status === SegmentStatus.Translated || s.status === SegmentStatus.Draft;
-          } else if (filterStatus === 'HasQAIssues') {
-              statusMatch = (s.qaIssues?.length || 0) > 0;
-          } else if (filterStatus !== 'All') {
-              statusMatch = s.status === filterStatus;
-          }
-          
-          let textMatch = true;
-          if (textSearchQuery.trim()) {
-              const query = textSearchQuery.toLowerCase();
-              const target = textSearchMode === 'source' ? s.sourceText : s.targetText;
-              textMatch = target.toLowerCase().includes(query);
-          }
+  // --- Filtering & Sorting Logic (snapshot queue) ---
+  const filterSnapshotKey = useMemo(
+    () =>
+      `${textSearchScope}|${activeFileId}|${filterStatus}|${textSearchQuery}|${textSearchMode}|${textSearchCaseSensitive}`,
+    [textSearchScope, activeFileId, filterStatus, textSearchQuery, textSearchMode, textSearchCaseSensitive],
+  );
 
-          return statusMatch && textMatch;
-      });
+  /** 筛选快照 ID：仅 filterSnapshotKey 变化时重建；句段编辑/状态变化不出队 */
+  const viewSegmentIds = useMemo(() => {
+    if (!activeFile) return [];
+    const allSegments =
+      textSearchScope === 'project'
+        ? project.files.flatMap((file) => file.segments)
+        : activeFile.segments;
+    return computeEditorFilterSnapshotIds(
+      allSegments,
+      filterStatus,
+      textSearchQuery,
+      textSearchMode,
+      textSearchCaseSensitive,
+      sortMode,
+      project.sourceLang,
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterSnapshotKey]);
 
-      if (sortMode !== 'natural') {
-          result = [...result].sort((a, b) => {
-              if (sortMode === 'status') {
-                  const statusWeight: Record<SegmentStatus, number> = {
-                      [SegmentStatus.NotStarted]: 0,
-                      [SegmentStatus.Draft]: 1,
-                      [SegmentStatus.PreTranslated]: 2,
-                      [SegmentStatus.Translated]: 3,
-                      [SegmentStatus.Review]: 4,
-                      [SegmentStatus.Proofread]: 5,
-                      [SegmentStatus.Confirmed]: 6,
-                      [SegmentStatus.Approved]: 7,
-                      [SegmentStatus.Rejected]: 8,
-                  };
-                  return statusWeight[a.status] - statusWeight[b.status];
-              }
-              if (sortMode === 'matchDesc') return (b.matchScore || 0) - (a.matchScore || 0);
-              if (sortMode === 'matchAsc') return (a.matchScore || 0) - (b.matchScore || 0);
-              if (sortMode === 'sourceAsc') return a.sourceText.localeCompare(b.sourceText, project.sourceLang);
-              if (sortMode === 'sourceDesc') return b.sourceText.localeCompare(a.sourceText, project.sourceLang);
-              if (sortMode === 'lengthAsc') return a.sourceText.length - b.sourceText.length;
-              if (sortMode === 'lengthDesc') return b.sourceText.length - a.sourceText.length;
-              return 0;
-          });
-      }
-      return result;
-  }, [project, project.sourceLang, activeFile, activeFile.segments, filterStatus, textSearchQuery, textSearchMode, textSearchScope, sortMode]);
+  const viewSegments = useMemo(() => {
+    if (!activeFile || viewSegmentIds.length === 0) return [];
+
+    const allSegments =
+      textSearchScope === 'project'
+        ? project.files.flatMap((file) => file.segments)
+        : activeFile.segments;
+    const byId = new Map(allSegments.map((s) => [s.id, s] as const));
+    const segments = viewSegmentIds
+      .map((id) => byId.get(id))
+      .filter((s): s is Segment => s != null);
+    return sortEditorSegments(segments, sortMode, project.sourceLang);
+  }, [activeFile, project.files, project.sourceLang, textSearchScope, viewSegmentIds, sortMode]);
 
   useEffect(() => {
-    if (!activeSegment?.sourceText?.trim() || !allTMs.length) {
+    if (!activeSegment?.sourceText?.trim()) {
       setTmMatches([]);
       return;
     }
     let cancelled = false;
-    void searchTmMatches(activeSegment.sourceText, allTMs, 50, 20).then((hits) => {
+    void (async () => {
+      let hits: TmMatchHit[] = [];
+      if (allTMs.length) {
+        hits = await searchTmMatches(activeSegment.sourceText, allTMs, 50, 20);
+      }
+      // 编辑区 100% 可能来自文件内重复沿用，而非 TM；此时仍应在匹配区展示来源句段
+      if (
+        hits.length === 0 &&
+        activeSegment.matchType === MatchType.Exact &&
+        activeSegment.targetText?.trim() &&
+        project
+      ) {
+        const sourceNorm = normalizeDuplicateSourceKey(activeSegment.sourceText);
+        const dupSource = getDuplicatePropagationSource(project, sourceNorm);
+        if (dupSource && dupSource.id !== activeSegment.id) {
+          hits = [
+            {
+              id: `dup-${dupSource.id}`,
+              source: dupSource.sourceText,
+              target: dupSource.targetText ?? '',
+              lastUsed: '',
+              usageCount: countSegmentsMatchingDuplicateSource(project, sourceNorm),
+              score: 100,
+              sourceTM: '文件内重复',
+              tmId: '__duplicate__',
+            },
+          ];
+        }
+      }
       if (!cancelled) setTmMatches(hits);
-    });
+    })();
     return () => {
       cancelled = true;
     };
-  }, [activeSegment?.id, activeSegment?.sourceText, allTMs]);
+  }, [
+    activeSegment?.id,
+    activeSegment?.sourceText,
+    activeSegment?.matchType,
+    activeSegment?.targetText,
+    allTMs,
+    project,
+  ]);
 
   useEffect(() => {
     if (idlePrefetchTimerRef.current) clearTimeout(idlePrefetchTimerRef.current);
     if (!activeFile || !allTMs.length || !activeSegmentId) return;
     idlePrefetchTimerRef.current = setTimeout(() => {
-      const idx = filteredSegments.findIndex((s) => s.id === activeSegmentId);
+      const idx = viewSegments.findIndex((s) => s.id === activeSegmentId);
       if (idx < 0) return;
-      const next = filteredSegments
+      const next = viewSegments
         .slice(idx + 1, idx + 6)
         .map((s) => ({ id: s.id, sourceText: s.sourceText }));
       prefetchTmMatches(next, allTMs);
@@ -2446,16 +2635,16 @@ export const Editor: React.FC<EditorProps> = ({
     return () => {
       if (idlePrefetchTimerRef.current) clearTimeout(idlePrefetchTimerRef.current);
     };
-  }, [activeSegmentId, activeFile, allTMs, filteredSegments]);
+  }, [activeSegmentId, activeFile, allTMs, viewSegments]);
 
   const dynamicRowHeight = useDynamicRowHeight({
     defaultRowHeight: 140,
-    key: `${activeFile?.id ?? ''}-${sortMode}-${filterStatus}-${textSearchMode}-${textSearchScope}-${filteredSegments.length}-${comparisonListMeasureEpoch}`,
+    key: `${activeFile?.id ?? ''}-${sortMode}-${filterStatus}-${textSearchMode}-${textSearchCaseSensitive}-${textSearchScope}-${viewSegments.length}-${comparisonListMeasureEpoch}`,
   });
 
   /** 无匹配句段时不渲染对照列表容器；若 effect 仅依赖 editorLayoutMode，observer 仍挂在已卸载节点上会把高度测成 0，切回「显示全部」后列表永远不出现 */
   const comparisonListViewportActive =
-    editorLayoutMode === 'comparison' && filteredSegments.length > 0;
+    editorLayoutMode === 'comparison' && viewSegments.length > 0;
 
   useLayoutEffect(() => {
     if (!comparisonListViewportActive) return;
@@ -2484,10 +2673,18 @@ export const Editor: React.FC<EditorProps> = ({
 
   const onComparisonRowsRendered = useCallback(
     (visible: { startIndex: number; stopIndex: number }) => {
-      if (editorLayoutMode !== 'comparison' || !activeSegmentId) return;
+      if (editorLayoutMode !== 'comparison') return;
       if (!pendingListScrollUntilVisibleRef.current) return;
-      const idx = filteredSegments.findIndex((s) => s.id === activeSegmentId);
-      if (idx < 0) return;
+      // 尚无激活句段时不要一直占着 pending，否则之后「跳转句段」会被滚动 effect 永久跳过
+      if (!activeSegmentId) {
+        pendingListScrollUntilVisibleRef.current = false;
+        return;
+      }
+      const idx = viewSegments.findIndex((s) => s.id === activeSegmentId);
+      if (idx < 0) {
+        pendingListScrollUntilVisibleRef.current = false;
+        return;
+      }
       const list = comparisonListRef.current;
       if (!list) return;
 
@@ -2502,29 +2699,26 @@ export const Editor: React.FC<EditorProps> = ({
       }
       scrollComparisonListToActiveRow(list, idx);
     },
-    [editorLayoutMode, filteredSegments, activeSegmentId]
+    [editorLayoutMode, viewSegments, activeSegmentId]
   );
 
   useEffect(() => {
-    if (editorLayoutMode !== 'comparison' || filteredSegments.length === 0) return;
+    if (editorLayoutMode !== 'comparison' || viewSegments.length === 0) return;
     if (comparisonListSize.height <= 0) return;
     // 从侧栏回到编辑：仅由 onRowsRendered 滚到当前句，避免与下面 scrollToRow 叠加导致「多滚几句」
     if (pendingListScrollUntilVisibleRef.current) return;
-    const idx = filteredSegments.findIndex((s) => s.id === activeSegmentId);
+    const idx = viewSegments.findIndex((s) => s.id === activeSegmentId);
     const list = comparisonListRef.current;
     if (idx < 0 || !list) return;
     const sig = `${activeSegmentId}|${comparisonListSize.height}|${idx}`;
     if (sig === comparisonScrollSigRef.current) return;
     comparisonScrollSigRef.current = sig;
-    const scroll = () => {
-      scrollComparisonListToActiveRow(list, idx);
-    };
-    scroll();
-    const t0 = window.setTimeout(scroll, 0);
-    return () => {
-      window.clearTimeout(t0);
-    };
-  }, [activeSegmentId, editorLayoutMode, filteredSegments, comparisonListSize.height]);
+    // 确认/点选切换：目标行已在视口内则不滚，避免每次确认都「整页刷新感」
+    scrollComparisonListToActiveRow(list, idx, 'ifNeeded');
+  }, [activeSegmentId, editorLayoutMode, viewSegments, comparisonListSize.height]);
+
+  // 术语提示条显隐由 ResizeObserver（useDynamicRowHeight）增量更新行高；
+  // 切句时勿重置整表测量缓存，否则可见行会先塌回默认高度再重测，产生明显抖动。
 
   // 仅切换文件时清空批量状态（勿随 resumeSegmentId 变化清空，否则会打断 TM 自动填充等 processed 跟踪）
   useEffect(() => {
@@ -2565,9 +2759,9 @@ export const Editor: React.FC<EditorProps> = ({
           const firstUnconfirmedSegment = activeFile.segments.find(
               (seg) => !seg.isLocked && seg.status !== SegmentStatus.Confirmed
           );
-          if (firstUnconfirmedSegment) {
-              setActiveSegmentId(firstUnconfirmedSegment.id);
-          }
+          setActiveSegmentId(
+              (firstUnconfirmedSegment ?? activeFile.segments[0])?.id ?? null
+          );
       }
       // eslint-disable-next-line react-hooks/exhaustive-deps -- activeFile 取闭包；不把 segments 列入依赖以免编辑时反复跳句
   }, [activeFileId, resumeLayoutKey, resumeSegmentId]);
@@ -2582,37 +2776,37 @@ export const Editor: React.FC<EditorProps> = ({
   }, [activeFileId, activeSegmentId, onEditorPlaceChange, project?.id]);
 
   useEffect(() => {
-      if (editorLayoutMode !== 'focus' || filteredSegments.length === 0) return;
+      if (editorLayoutMode !== 'focus' || viewSegments.length === 0) return;
       // 从侧栏回到编辑首帧 activeSegmentId 常为 null，须等上层 layout 按 resume 设句；勿此时写成第一句
       if (activeSegmentId == null) return;
-      const inList = filteredSegments.some((s) => s.id === activeSegmentId);
+      const inList = viewSegments.some((s) => s.id === activeSegmentId);
       if (!inList) {
-          setActiveSegmentId(filteredSegments[0].id);
+          setActiveSegmentId(viewSegments[0].id);
       }
-  }, [editorLayoutMode, filteredSegments, activeSegmentId]);
+  }, [editorLayoutMode, viewSegments, activeSegmentId]);
 
   const focusResolved = useMemo(() => {
-      if (!filteredSegments.length) return { seg: null as Segment | null, indexInFiltered: -1 };
-      const idx = filteredSegments.findIndex((s) => s.id === activeSegmentId);
-      if (idx >= 0) return { seg: filteredSegments[idx], indexInFiltered: idx };
-      return { seg: filteredSegments[0], indexInFiltered: 0 };
-  }, [filteredSegments, activeSegmentId]);
+      if (!viewSegments.length) return { seg: null as Segment | null, indexInFiltered: -1 };
+      const idx = viewSegments.findIndex((s) => s.id === activeSegmentId);
+      if (idx >= 0) return { seg: viewSegments[idx], indexInFiltered: idx };
+      return { seg: viewSegments[0], indexInFiltered: 0 };
+  }, [viewSegments, activeSegmentId]);
 
   const goToPrevFilteredSegment = useCallback(() => {
-      const idx = filteredSegments.findIndex((s) => s.id === activeSegmentId);
-      if (idx > 0) setActiveSegmentId(filteredSegments[idx - 1].id);
-  }, [filteredSegments, activeSegmentId]);
+      const idx = viewSegments.findIndex((s) => s.id === activeSegmentId);
+      if (idx > 0) setActiveSegmentId(viewSegments[idx - 1].id);
+  }, [viewSegments, activeSegmentId]);
 
   const goToNextFilteredSegment = useCallback(() => {
-      const idx = filteredSegments.findIndex((s) => s.id === activeSegmentId);
-      if (idx >= 0 && idx < filteredSegments.length - 1) {
-          setActiveSegmentId(filteredSegments[idx + 1].id);
+      const idx = viewSegments.findIndex((s) => s.id === activeSegmentId);
+      if (idx >= 0 && idx < viewSegments.length - 1) {
+          setActiveSegmentId(viewSegments[idx + 1].id);
       }
-  }, [filteredSegments, activeSegmentId]);
+  }, [viewSegments, activeSegmentId]);
 
   const goToFirstFilteredSegment = useCallback(() => {
-      if (filteredSegments.length === 0) return;
-      const first = filteredSegments[0];
+      if (viewSegments.length === 0) return;
+      const first = viewSegments[0];
       const loc = findSegmentLocation(first.id);
       if (!loc) return;
       if (loc.file.id !== activeFileId) {
@@ -2625,7 +2819,30 @@ export const Editor: React.FC<EditorProps> = ({
           });
       }
   }, [
-      filteredSegments,
+      viewSegments,
+      findSegmentLocation,
+      activeFileId,
+      onActiveFileChange,
+      editorLayoutMode,
+  ]);
+
+  const goToLastFilteredSegment = useCallback(() => {
+      if (viewSegments.length === 0) return;
+      const lastIndex = viewSegments.length - 1;
+      const last = viewSegments[lastIndex];
+      const loc = findSegmentLocation(last.id);
+      if (!loc) return;
+      if (loc.file.id !== activeFileId) {
+          onActiveFileChange(loc.file.id);
+      }
+      setActiveSegmentId(last.id);
+      if (editorLayoutMode === 'comparison') {
+          requestAnimationFrame(() => {
+              scrollComparisonListToActiveRow(comparisonListRef.current, lastIndex);
+          });
+      }
+  }, [
+      viewSegments,
       findSegmentLocation,
       activeFileId,
       onActiveFileChange,
@@ -2649,9 +2866,29 @@ export const Editor: React.FC<EditorProps> = ({
               ) {
                   return;
               }
-              if (filteredSegments.length === 0) return;
+              if (viewSegments.length === 0) return;
               e.preventDefault();
               goToFirstFilteredSegment();
+              return;
+          }
+          if (
+              (e.ctrlKey || e.metaKey) &&
+              e.key === 'End' &&
+              !e.altKey &&
+              !e.shiftKey
+          ) {
+              const t = e.target as HTMLElement;
+              if (
+                  t.closest('textarea') ||
+                  t.closest('input') ||
+                  t.closest('select') ||
+                  t.isContentEditable
+              ) {
+                  return;
+              }
+              if (viewSegments.length === 0) return;
+              e.preventDefault();
+              goToLastFilteredSegment();
               return;
           }
           if (editorLayoutMode !== 'focus') return;
@@ -2669,7 +2906,8 @@ export const Editor: React.FC<EditorProps> = ({
       goToPrevFilteredSegment,
       goToNextFilteredSegment,
       goToFirstFilteredSegment,
-      filteredSegments,
+      goToLastFilteredSegment,
+      viewSegments,
   ]);
 
   const handleJumpFromQA = useCallback((fileId: string, segmentId: string) => {
@@ -2683,7 +2921,7 @@ export const Editor: React.FC<EditorProps> = ({
       if (!pendingQASegmentJump) return;
       if (activeFile.id !== pendingQASegmentJump.fileId) return;
 
-      const targetIndex = filteredSegments.findIndex(s => s.id === pendingQASegmentJump.segmentId);
+      const targetIndex = viewSegments.findIndex(s => s.id === pendingQASegmentJump.segmentId);
       if (targetIndex === -1) {
           setActiveSegmentId(pendingQASegmentJump.segmentId);
           setPendingQASegmentJump(null);
@@ -2692,7 +2930,7 @@ export const Editor: React.FC<EditorProps> = ({
 
       setActiveSegmentId(pendingQASegmentJump.segmentId);
       setPendingQASegmentJump(null);
-  }, [pendingQASegmentJump, activeFile.id, filteredSegments]);
+  }, [pendingQASegmentJump, activeFile.id, viewSegments]);
 
   // ... (Previous Export functions omitted for brevity, they remain same) ...
   // 导出功能已从界面移除，相关函数已注释
@@ -3554,10 +3792,6 @@ export const Editor: React.FC<EditorProps> = ({
           onUpdateMultipleFileSegments(segmentUpdates);
       }
 
-      if (shouldPropagateDuplicates) {
-          setComparisonListMeasureEpoch((e) => e + 1);
-      }
-
       // ONLY Write to Main TM if confirmed
       if (segFromFile.sourceText && finalTarget && mainTM) {
           const unit: TranslationMemoryUnit = {
@@ -3570,11 +3804,11 @@ export const Editor: React.FC<EditorProps> = ({
           onAddTM(unit);
       }
 
-      const currentViewIndex = filteredSegments.findIndex(s => s.id === segment.id);
+      const currentViewIndex = viewSegments.findIndex(s => s.id === segment.id);
       if (currentViewIndex !== -1) {
           let nextId: string | null = null;
-          for (let i = currentViewIndex + 1; i < filteredSegments.length; i++) {
-              const nextSeg = filteredSegments[i];
+          for (let i = currentViewIndex + 1; i < viewSegments.length; i++) {
+              const nextSeg = viewSegments[i];
               if (!nextSeg.isLocked && nextSeg.status !== SegmentStatus.Confirmed) {
                   nextId = nextSeg.id;
                   break;
@@ -3590,7 +3824,7 @@ export const Editor: React.FC<EditorProps> = ({
       project,
       mainTM,
       onAddTM,
-      filteredSegments,
+      viewSegments,
       setActiveSegmentId,
       activeSegmentId,
       capitalizeTargetFirstLetterZhOut,
@@ -3610,24 +3844,47 @@ export const Editor: React.FC<EditorProps> = ({
 
   const handleJumpToSegment = (e: React.FormEvent) => {
       e.preventDefault();
-      const num = parseInt(jumpInput);
+      e.stopPropagation();
+      if (!activeFile?.segments?.length) return;
+      const num = parseInt(String(jumpInput).trim(), 10);
       if (isNaN(num)) return;
       const targetIndex = num - 1;
-      if (targetIndex >= 0 && targetIndex < activeFile.segments.length) {
-          const segId = activeFile.segments[targetIndex].id;
-          setActiveSegmentId(segId);
-          setJumpInput('');
-          setShowJumpInput(false);
-          requestAnimationFrame(() => {
-            if (editorLayoutMode !== 'comparison') return;
-            const idx = filteredSegments.findIndex((s) => s.id === segId);
-            if (idx >= 0) {
-              scrollComparisonListToActiveRow(comparisonListRef.current, idx);
-            }
-          });
-      } else {
+      if (targetIndex < 0 || targetIndex >= activeFile.segments.length) {
           alert('无效的句段编号');
+          return;
       }
+
+      const segId = activeFile.segments[targetIndex].id;
+      const viewIdx = viewSegments.findIndex((s) => s.id === segId);
+      if (viewIdx < 0) {
+          alert('该句段不在当前筛选结果中，请先清除筛选或搜索条件后再跳转');
+          return;
+      }
+
+      setActiveSegmentId(segId);
+      setSelectedSegmentIds(new Set([segId]));
+      setLastInteractedId(segId);
+      setJumpInput('');
+      setShowJumpInput(false);
+
+      // 无先前激活句段时，对照列表可能仍卡在 pending 滚动门闩上；强制重新走定位
+      comparisonScrollSigRef.current = '';
+      pendingListScrollUntilVisibleRef.current = true;
+      resumeListScrollNudgeDoneRef.current = false;
+
+      const scrollToTarget = () => {
+          if (editorLayoutMode === 'comparison') {
+              scrollComparisonListToActiveRow(comparisonListRef.current, viewIdx);
+              return;
+          }
+          activeRowRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      };
+
+      requestAnimationFrame(() => {
+          scrollToTarget();
+          window.setTimeout(scrollToTarget, 50);
+          window.setTimeout(scrollToTarget, 160);
+      });
   };
 
   const handleCopySourceToTarget = () => {
@@ -3939,15 +4196,21 @@ export const Editor: React.FC<EditorProps> = ({
       }
   };
 
-  const handleBatchTranslateSelection = async () => {
+  const handleBatchTranslateSelection = async (targetIds: Set<string>) => {
       const readinessError = getAIReadinessError(aiSettings);
       if (readinessError) {
           alert(readinessError);
           return;
       }
-      const targets = activeFile.segments.filter(
-          (s) => selectedSegmentIds.has(s.id) && !s.isLocked
-      );
+      const idSet = targetIds;
+      const targets: { file: ProjectFile; segment: Segment }[] = [];
+      for (const file of project.files) {
+          for (const s of file.segments) {
+              if (idSet.has(s.id) && !s.isLocked) {
+                  targets.push({ file, segment: s });
+              }
+          }
+      }
       if (targets.length === 0) {
           alert('没有可翻译的选中句段（可能均已锁定）。');
           return;
@@ -3956,11 +4219,26 @@ export const Editor: React.FC<EditorProps> = ({
       const CONCURRENCY_LIMIT = 3;
       let currentIndex = 0;
       const activePromises: Promise<void>[] = [];
-      let currentSegments = [...activeFile.segments];
+      const segmentsByFile = new Map<string, Segment[]>(
+          project.files.map((f) => [f.id, [...f.segments]])
+      );
+
+      const flushBatchTranslateSegmentsByFile = (byFile: Map<string, Segment[]>) => {
+          const updates: { fileId: string; segments: Segment[] }[] = [];
+          for (const file of project.files) {
+              const segs = byFile.get(file.id);
+              if (segs) updates.push({ fileId: file.id, segments: segs });
+          }
+          if (updates.length === 1) {
+              onUpdateFileSegments(updates[0].fileId, updates[0].segments);
+          } else if (updates.length > 1) {
+              onUpdateMultipleFileSegments(updates);
+          }
+      };
 
       const processNext = async () => {
           if (currentIndex >= targets.length) return;
-          const seg = targets[currentIndex];
+          const { file, segment: seg } = targets[currentIndex];
           currentIndex++;
           try {
               const ragContext = await buildRagContextStringAsync(
@@ -3974,6 +4252,7 @@ export const Editor: React.FC<EditorProps> = ({
                   project.contextDescription,
                   ragContext
               );
+              const currentSegments = segmentsByFile.get(file.id)!;
               const segIndex = currentSegments.findIndex((s) => s.id === seg.id);
               if (segIndex !== -1) {
                   currentSegments[segIndex] = applyTagFormatQaToSegment(
@@ -3983,12 +4262,13 @@ export const Editor: React.FC<EditorProps> = ({
                           status: SegmentStatus.Translated,
                           matchType: MatchType.AI,
                       },
-                      activeFile,
+                      file,
                       result
                   );
+                  segmentsByFile.set(file.id, currentSegments);
               }
               if (currentIndex % 3 === 0 || currentIndex === targets.length) {
-                  onUpdateFileSegments(activeFile.id, [...currentSegments]);
+                  flushBatchTranslateSegmentsByFile(segmentsByFile);
               }
           } catch (e) {
               console.error('[Editor] 批量翻译句段失败', seg.id, e);
@@ -4010,7 +4290,7 @@ export const Editor: React.FC<EditorProps> = ({
               if (activePromises.length === 0) break;
               await Promise.race(activePromises);
           }
-          onUpdateFileSegments(activeFile.id, [...currentSegments]);
+          flushBatchTranslateSegmentsByFile(segmentsByFile);
       } finally {
           setIsSelectionBatchTranslating(false);
       }
@@ -4230,43 +4510,129 @@ export const Editor: React.FC<EditorProps> = ({
       }
   };
 
-  // --- NEW: Batch Operations Logic ---
-  const handleBatchOperation = (operation: 'lock' | 'unlock' | 'confirm' | 'clear' | 'copySource' | 'status-draft') => {
-      if (selectedSegmentIds.size === 0) return;
-      
-      const tmUnitsToAdd: TranslationMemoryUnit[] = [];
-      const updatedSegments = activeFile.segments.map(seg => {
-          if (!selectedSegmentIds.has(seg.id)) return seg;
-          
-          switch(operation) {
-              case 'lock': return { ...seg, isLocked: true };
-              case 'unlock': return { ...seg, isLocked: false };
-              case 'confirm':
-                  if (seg.sourceText && seg.targetText && mainTM) {
-                      tmUnitsToAdd.push({
-                          id: `tm-u-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-                          source: seg.sourceText,
-                          target: seg.targetText,
-                          lastUsed: new Date().toISOString().split('T')[0],
-                          usageCount: 1
-                      });
-                  }
-                  return seg.targetText ? { ...seg, status: SegmentStatus.Confirmed } : seg;
-              case 'clear':
-                   return !seg.isLocked ? { ...seg, targetText: '', status: SegmentStatus.NotStarted } : seg;
-              case 'copySource':
-                   return !seg.isLocked ? { ...seg, targetText: seg.sourceText, status: SegmentStatus.Draft } : seg;
-              case 'status-draft':
-                   return !seg.isLocked ? { ...seg, status: SegmentStatus.Draft } : seg;
-              default: return seg;
+  const resolveBatchTargetIds = useCallback(
+      (scope: BatchSegmentScope): Set<string> => {
+          switch (scope) {
+              case 'selected':
+                  return new Set(selectedSegmentIds);
+              case 'filtered':
+                  return new Set(viewSegments.map((s) => s.id));
+              case 'all': {
+                  const segs =
+                      textSearchScope === 'project'
+                          ? project.files.flatMap((f) => f.segments)
+                          : activeFile?.segments ?? [];
+                  return new Set(segs.map((s) => s.id));
+              }
+              default:
+                  return new Set(selectedSegmentIds);
           }
-      });
-  
-      onUpdateFileSegments(activeFile.id, updatedSegments);
-      if (operation === 'confirm' && mainTM && tmUnitsToAdd.length > 0) {
-          tmUnitsToAdd.forEach(unit => onAddTM(unit));
+      },
+      [selectedSegmentIds, viewSegments, textSearchScope, project.files, activeFile?.segments]
+  );
+
+  const allScopeSegmentCount = useMemo(() => {
+      if (textSearchScope === 'project') {
+          return project.files.reduce((n, f) => n + f.segments.length, 0);
       }
-      // Keep selection active for visibility
+      return activeFile?.segments.length ?? 0;
+  }, [textSearchScope, project.files, activeFile?.segments.length]);
+
+  const openBatchScopeModal = (operation: BatchSegmentOperation) => {
+      setBatchScopeModal({ operation });
+  };
+
+  const applyBatchOperation = (
+      operation: 'lock' | 'unlock' | 'confirm' | 'clear' | 'copySource' | 'status-draft',
+      targetIds: Set<string>
+  ) => {
+      if (targetIds.size === 0) return;
+
+      const tmUnitsToAdd: TranslationMemoryUnit[] = [];
+      const updates: { fileId: string; segments: Segment[] }[] = [];
+
+      for (const file of project.files) {
+          let touched = false;
+          const updatedSegments = file.segments.map((seg) => {
+              if (!targetIds.has(seg.id)) return seg;
+              touched = true;
+
+              switch (operation) {
+                  case 'lock':
+                      return { ...seg, isLocked: true };
+                  case 'unlock':
+                      return { ...seg, isLocked: false };
+                  case 'confirm':
+                      if (seg.sourceText && seg.targetText && mainTM) {
+                          tmUnitsToAdd.push({
+                              id: `tm-u-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+                              source: seg.sourceText,
+                              target: seg.targetText,
+                              lastUsed: new Date().toISOString().split('T')[0],
+                              usageCount: 1,
+                          });
+                      }
+                      return seg.targetText
+                          ? { ...seg, status: SegmentStatus.Confirmed }
+                          : seg;
+                  case 'clear':
+                      return !seg.isLocked
+                          ? { ...seg, targetText: '', status: SegmentStatus.NotStarted }
+                          : seg;
+                  case 'copySource':
+                      return !seg.isLocked
+                          ? { ...seg, targetText: seg.sourceText, status: SegmentStatus.Draft }
+                          : seg;
+                  case 'status-draft':
+                      return !seg.isLocked ? { ...seg, status: SegmentStatus.Draft } : seg;
+                  default:
+                      return seg;
+              }
+          });
+          if (touched) {
+              updates.push({ fileId: file.id, segments: updatedSegments });
+          }
+      }
+
+      if (updates.length === 1) {
+          onUpdateFileSegments(updates[0].fileId, updates[0].segments);
+      } else if (updates.length > 1) {
+          onUpdateMultipleFileSegments(updates);
+      }
+
+      if (operation === 'confirm' && mainTM && tmUnitsToAdd.length > 0) {
+          tmUnitsToAdd.forEach((unit) => onAddTM(unit));
+      }
+  };
+
+  const handleBatchScopeConfirm = async (scope: BatchSegmentScope) => {
+      if (!batchScopeModal) return;
+      const targetIds = resolveBatchTargetIds(scope);
+      if (targetIds.size === 0) {
+          alert('当前应用范围内没有可操作句段。');
+          return;
+      }
+
+      const { operation } = batchScopeModal;
+      if (operation === 'translate') {
+          setBatchScopeModal(null);
+          await handleBatchTranslateSelection(targetIds);
+          return;
+      }
+
+      applyBatchOperation(operation, targetIds);
+      setBatchScopeModal(null);
+  };
+
+  // --- Batch Operations Logic ---
+  const handleBatchOperation = (
+      operation: 'lock' | 'unlock' | 'confirm' | 'clear' | 'copySource' | 'status-draft'
+  ) => {
+      if (operation === 'status-draft') {
+          applyBatchOperation(operation, resolveBatchTargetIds('selected'));
+          return;
+      }
+      openBatchScopeModal(operation);
   };
 
   const handleMergeSelectedSegments = () => {
@@ -4361,7 +4727,7 @@ export const Editor: React.FC<EditorProps> = ({
     
     // Check for Ctrl/Cmd (Mac) or Shift
     if (e.shiftKey && lastInteractedId) {
-        const allIds = filteredSegments.map(s => s.id);
+        const allIds = viewSegments.map(s => s.id);
         const start = allIds.indexOf(lastInteractedId);
         const end = allIds.indexOf(segId);
         
@@ -4399,7 +4765,7 @@ export const Editor: React.FC<EditorProps> = ({
 
       // Allow range selection on checkbox
       if (e.shiftKey && lastInteractedId) {
-           const allIds = filteredSegments.map(s => s.id);
+           const allIds = viewSegments.map(s => s.id);
            const start = allIds.indexOf(lastInteractedId);
            const end = allIds.indexOf(segId);
            
@@ -4660,215 +5026,48 @@ export const Editor: React.FC<EditorProps> = ({
       XLSX.writeFile(workbook, `${base}.xlsx`);
   };
 
-  const runLocalQAChecks = (seg: Segment, targetLang: string): QAIssue[] => {
-     const issues: QAIssue[] = [];
-     const s = seg.sourceText;
-     const t = seg.targetText;
+  const handleRunFullQA = async () => {
+      if (isLocalQAProcessing) return;
 
-     if (!t) return [];
+      localQaAbortRef.current?.abort();
+      const controller = new AbortController();
+      localQaAbortRef.current = controller;
 
-     if (qaConfig.sourceTargetSame) {
-         const st = s.trim();
-         const tt = t.trim();
-         if (st && st === tt) {
-             issues.push({ id: `qa-same-${seg.id}`, type: 'warning', category: '原文译文', message: '原文和译文相同' });
-         }
-     }
-     if (qaConfig.numberAccuracy) {
-         const getNums = (str: string) =>
-             stripInlineMarkers(str).match(/\d+/g)?.sort().join(',') || '';
-         if (getNums(s) !== getNums(t)) {
-             issues.push({ id: `qa-num-${seg.id}`, type: 'error', category: '数字', message: '原文与译文数字不匹配' });
-         }
-     }
-     if (qaConfig.termMatch && mainTB) {
-         const tbEntries = mainTB.entries;
-         for (const term of tbEntries) {
-             if (
-                 termSourceHitsSegment(s, term, tbEntries, qaConfig.ignoreCase) &&
-                 !targetContainsTermTranslation(t, term, qaConfig.ignoreCase)
-             ) {
-                 issues.push({
-                     id: `qa-term-${seg.id}-${term.id}`,
-                     type: 'warning',
-                     category: '术语',
-                     message: `缺失术语翻译: ${term.source} -> ${term.target}`,
-                 });
-             }
-         }
-     }
-     if (qaConfig.punctuationPair) {
-         const checkPair = (charA: string, charB: string) => {
-             const countA = (t.split(charA).length - 1);
-             const countB = (t.split(charB).length - 1);
-             return countA === countB;
-         }
-         if (!checkPair('(', ')') || !checkPair('（', '）')) issues.push({ id: `qa-punc-br-${seg.id}`, type: 'warning', category: '标点', message: '括号不匹配' });
-         if (!checkPair('[', ']') || !checkPair('【', '】')) issues.push({ id: `qa-punc-sq-${seg.id}`, type: 'warning', category: '标点', message: '方括号不匹配' });
-     }
-     if (qaConfig.untranslated) {
-         const sameTrimmed = s.trim() === t.trim();
-         if (/[a-zA-Z]/.test(s) && sameTrimmed && !(qaConfig.sourceTargetSame && sameTrimmed)) {
-             issues.push({ id: `qa-untrans-${seg.id}`, type: 'error', category: '未翻译', message: '译文与原文相同' });
-         }
-     }
-     if (qaConfig.repeatedWords) {
-         let repetitionMatches: string[] = [];
-         
-         // Check repetition based on target language
-         if (targetLang.startsWith('zh-')) {
-             // Chinese-specific repetition checks
-             
-             // 1. Single Chinese character repetition: 我我, 天天, 好好
-             // Changed from 2+ repetitions to 1+ to catch "好好" pattern
-             const chineseCharRepeatRegex = /([\u4e00-\u9fa5])\1{1,}/g;
-             let charMatch;
-             while ((charMatch = chineseCharRepeatRegex.exec(t)) !== null) {
-                 repetitionMatches.push(charMatch[0]);
-                 // Prevent infinite loop by breaking if lastIndex doesn't increase
-                 if (chineseCharRepeatRegex.lastIndex === charMatch.index) {
-                     break;
-                 }
-             }
-             
-             // 2. Two-character Chinese word repetition: 学习学习学习, 好好好好
-             const chineseWordRepeatRegex = /([\u4e00-\u9fa5]{2})\1{1,}/g;
-             let wordMatch;
-             while ((wordMatch = chineseWordRepeatRegex.exec(t)) !== null) {
-                 repetitionMatches.push(wordMatch[0]);
-                 // Prevent infinite loop by breaking if lastIndex doesn't increase
-                 if (chineseWordRepeatRegex.lastIndex === wordMatch.index) {
-                     break;
-                 }
-             }
-             
-             // 3. ABAB pattern repetition: 好好学习, 天天向上
-             const chineseAbabRepeatRegex = /([\u4e00-\u9fa5])([\u4e00-\u9fa5])\1\2/g;
-             let ababMatch;
-             while ((ababMatch = chineseAbabRepeatRegex.exec(t)) !== null) {
-                 repetitionMatches.push(ababMatch[0]);
-                 // Prevent infinite loop by breaking if lastIndex doesn't increase
-                 if (chineseAbabRepeatRegex.lastIndex === ababMatch.index) {
-                     break;
-                 }
-             }
-             
-             // 4. Three-character Chinese phrase repetition: 准备好了准备好了
-             const chinesePhraseRepeatRegex = /([\u4e00-\u9fa5]{3})\1{1,}/g;
-             let phraseMatch;
-             while ((phraseMatch = chinesePhraseRepeatRegex.exec(t)) !== null) {
-                 repetitionMatches.push(phraseMatch[0]);
-                 // Prevent infinite loop by breaking if lastIndex doesn't increase
-                 if (chinesePhraseRepeatRegex.lastIndex === phraseMatch.index) {
-                     break;
-                 }
-             }
-         } else {
-             // English-specific repetition checks
-             
-             // 1. Word-level repetition with spaces: "the the", "and and"
-             const englishWordRepeatRegex = /(\b\w+\b)\s+\1\b/gi;
-             let wordMatch;
-             while ((wordMatch = englishWordRepeatRegex.exec(t)) !== null) {
-                 repetitionMatches.push(wordMatch[0]);
-                 // Prevent infinite loop by breaking if lastIndex doesn't increase
-                 if (englishWordRepeatRegex.lastIndex === wordMatch.index) {
-                     break;
-                 }
-             }
-             
-            // 2. Capitalized word repetition: "The the", "Hello hello"（JS 不支持 (?i:\1)，用两组捕获 + 大小写无关比较）
-            const englishCapWordRepeatRegex = /(\b[A-Z]\w+)\s+(\w+)\b/g;
-            let capMatch;
-            while ((capMatch = englishCapWordRepeatRegex.exec(t)) !== null) {
-                if (capMatch[1].toLowerCase() === capMatch[2].toLowerCase()) {
-                    repetitionMatches.push(capMatch[0]);
-                }
-                if (englishCapWordRepeatRegex.lastIndex === capMatch.index) {
-                    break;
-                }
-            }
-             
-             // 3. Short phrase repetition: "in the in the", "on the on the"
-             const englishPhraseRepeatRegex = /(\b\w+\s+\w+\b)\s+\1\b/gi;
-             let phraseMatch;
-             while ((phraseMatch = englishPhraseRepeatRegex.exec(t)) !== null) {
-                 repetitionMatches.push(phraseMatch[0]);
-                 // Prevent infinite loop by breaking if lastIndex doesn't increase
-                 if (englishPhraseRepeatRegex.lastIndex === phraseMatch.index) {
-                     break;
-                 }
-             }
-         }
-         
-         // Remove duplicate matches and add issues
-         if (repetitionMatches.length > 0) {
-             const uniqueMatches = [...new Set(repetitionMatches)];
-             const firstMatch = uniqueMatches[0];
-             issues.push({ 
-                 id: `qa-repeat-${seg.id}`, 
-                 type: 'warning', 
-                 category: '重复', 
-                 message: `发现重复内容: ${firstMatch}${uniqueMatches.length > 1 ? ' 等' : ''}` 
-             });
-         }
-     }
-     if (qaConfig.targetLength) {
-         if (t.length > s.length * 2.5) {
-             issues.push({ id: `qa-len-${seg.id}`, type: 'warning', category: '长度', message: '译文过长 (>250%)' });
-         }
-     }
-     if (qaConfig.inconsistency) {
-         if (t && t.trim()) {
-             const others = activeFile.segments.filter(other => 
-                 other.id !== seg.id && 
-                 other.sourceText === s && 
-                 other.targetText && 
-                 other.targetText.trim() !== '' &&
-                 other.targetText !== t
-             );
-             if (others.length > 0) {
-                 const uniqueOthers = Array.from(new Set(others.map(o => o.targetText)));
-                 const example = uniqueOthers[0] as string;
-                 const truncated = example.length > 10 ? example.substring(0, 10) + '...' : example;
-                 issues.push({ 
-                     id: `qa-inc-${seg.id}`, 
-                     type: 'warning', 
-                     category: '一致性', 
-                     message: `译文不一致 (如: ${truncated})` 
-                 });
-             }
-         }
-     }
-     
-     if (qaConfig.sentenceCapitalization) {
-         const trimmedTarget = t.trim();
-         if (trimmedTarget) {
-             const firstChar = trimmedTarget[0];
-             if (/[a-z]/.test(firstChar)) {
-                 issues.push({ 
-                     id: `qa-cap-${seg.id}`, 
-                     type: 'warning', 
-                     category: '大小写', 
-                     message: '译文句首字母应为大写' 
-                 });
-             }
-         }
-     }
-     
-     return issues;
-  };
+      const fileId = activeFile.id;
+      const segmentsSnapshot = activeFile.segments;
+      const total = segmentsSnapshot.length;
 
-  const handleRunFullQA = () => {
-      const updatedSegments = activeFile.segments.map(seg => ({
-          ...seg,
-          qaIssues: runLocalQAChecks(seg, project.targetLang)
-      }));
-      onUpdateFileSegments(activeFile.id, updatedSegments);
-      setQaReportScope('current'); // 始终显示当前文件的QA结果
-      setShowQAPanel(true);
-      setShowReplacePanel(false);
+      setIsLocalQAProcessing(true);
+      setLocalQaProgress({ current: 0, total });
       setShowQASettings(false);
+      setShowReplacePanel(false);
+
+      try {
+          const updatedSegments = await runLocalQaOnSegments(
+              segmentsSnapshot,
+              project.targetLang,
+              qaConfig,
+              mainTB?.entries,
+              {
+                  signal: controller.signal,
+                  onProgress: (done, tot) => setLocalQaProgress({ current: done, total: tot }),
+              }
+          );
+          if (controller.signal.aborted) return;
+          onUpdateFileSegments(fileId, updatedSegments);
+          setQaReportScope('current');
+          setShowQAPanel(true);
+      } catch (err) {
+          if (err instanceof DOMException && err.name === 'AbortError') return;
+          console.error('Local QA failed:', err);
+          alert('本地 QA 检查失败，请重试。');
+      } finally {
+          if (localQaAbortRef.current === controller) {
+              localQaAbortRef.current = null;
+          }
+          setIsLocalQAProcessing(false);
+          setLocalQaProgress({ current: 0, total: 0 });
+      }
   };
 
   const handleRunDeepAIQA = async () => {
@@ -4888,7 +5087,13 @@ export const Editor: React.FC<EditorProps> = ({
 
           const aiIssues = await runDeepQACheck(segment.sourceText, segment.targetText, project.targetLang, enabledChecks, aiSettings);
           
-          const localIssues = runLocalQAChecks(segment, project.targetLang);
+          const localIssues = runLocalQaOnSegment(
+              segment,
+              project.targetLang,
+              qaConfig,
+              mainTB?.entries,
+              qaConfig.inconsistency ? buildInconsistencyIndex(file.segments) : undefined
+          );
           const allIssues = [...localIssues, ...aiIssues];
           
           const updated = file.segments.map(s => s.id === segment.id ? { ...s, qaIssues: allIssues } : s);
@@ -4992,7 +5197,7 @@ export const Editor: React.FC<EditorProps> = ({
   };
 
   const comparisonRowProps: ComparisonVirtualRowCtx = {
-    filteredSegments,
+    viewSegments,
     project: project as Project,
     reduceMotion: reduceVisualEffects,
     activeSegmentId,
@@ -5080,6 +5285,41 @@ export const Editor: React.FC<EditorProps> = ({
 
   return (
     <div className="flex h-full bg-slate-100 overflow-hidden relative">
+        {isLocalQAProcessing && createPortal(
+            <div className="fixed inset-0 z-[160] flex items-center justify-center bg-slate-900/40 backdrop-blur-[1px] pointer-events-auto">
+                <div className="bg-white rounded-xl shadow-xl px-6 py-5 w-full max-w-sm border border-slate-200">
+                    <div className="flex items-center gap-3 mb-3">
+                        <Icons.QA className="w-5 h-5 text-blue-600 animate-pulse" />
+                        <div>
+                            <div className="text-sm font-semibold text-slate-900">本地 QA 检查中</div>
+                            <div className="text-xs text-slate-500 mt-0.5">
+                                {localQaProgress.total > 0
+                                    ? `${localQaProgress.current} / ${localQaProgress.total} 句段`
+                                    : '准备中…'}
+                            </div>
+                        </div>
+                    </div>
+                    <div className="h-1.5 bg-slate-100 rounded-full overflow-hidden mb-4">
+                        <div
+                            className="h-full bg-blue-500 transition-[width] duration-150"
+                            style={{
+                                width: localQaProgress.total > 0
+                                    ? `${Math.min(100, (localQaProgress.current / localQaProgress.total) * 100)}%`
+                                    : '8%',
+                            }}
+                        />
+                    </div>
+                    <button
+                        type="button"
+                        className="w-full text-sm py-2 rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50"
+                        onClick={() => localQaAbortRef.current?.abort()}
+                    >
+                        取消
+                    </button>
+                </div>
+            </div>,
+            document.body
+        )}
         <div className="flex-1 flex flex-col min-w-0 relative">
             {deliveryDueReminder && dueBannerLook ? (
                 <div
@@ -5213,9 +5453,8 @@ export const Editor: React.FC<EditorProps> = ({
             
             {/* Top Toolbar */}
             <div className="h-14 bg-white border-b border-slate-200 px-4 flex items-center justify-between shrink-0 z-20 relative">
-               <div className="flex items-center gap-4">
-                   <div className="flex items-center gap-2">
-                        <div className="h-4 w-px bg-slate-300 mx-1"></div>
+               <div className="flex items-center gap-1">
+                   <div className="h-4 w-px bg-slate-300 mx-1"></div>
                         
                         {/* New Search Toolbar */}
                         <div className="relative flex items-center bg-slate-100 rounded-md border border-slate-200 focus-within:border-blue-400 focus-within:ring-2 focus-within:ring-blue-500/10 transition-all">
@@ -5260,6 +5499,20 @@ export const Editor: React.FC<EditorProps> = ({
                                     }
                                 }}
                              />
+                             <button
+                                type="button"
+                                onMouseDown={(e) => e.preventDefault()}
+                                onClick={() => setTextSearchCaseSensitive((v) => !v)}
+                                className={`p-1 shrink-0 rounded border-l border-slate-300 transition-colors ${
+                                    textSearchCaseSensitive
+                                        ? 'text-blue-600 bg-blue-50'
+                                        : 'text-slate-400 hover:text-slate-600 hover:bg-slate-200/60'
+                                }`}
+                                title="区分大小写"
+                                aria-pressed={textSearchCaseSensitive}
+                             >
+                                <Icons.CaseSensitive className="w-3.5 h-3.5" />
+                             </button>
                              {(textSearchDraft || textSearchQuery) && (
                                  <button
                                     type="button"
@@ -5273,60 +5526,85 @@ export const Editor: React.FC<EditorProps> = ({
                              )}
                         </div>
 
-                        {/* Find and Replace Trigger */}
-                        <button 
-                            onClick={() => setIsReplaceModalOpen(true)}
-                            className="flex items-center gap-1 px-2 py-1.5 text-slate-500 hover:text-blue-600 hover:bg-slate-50 rounded-md transition-colors"
-                            title="查找与替换 (仅译文)"
-                        >
-                            <Icons.Translate className="w-4 h-4" />
-                        </button>
-                        
-                        {/* Jump to Segment */}
-                        <div className="relative">
-                            <button 
-                                onClick={() => setShowJumpInput(!showJumpInput)}
-                                className={`p-1.5 rounded-md transition-colors ${showJumpInput ? 'bg-slate-100 text-slate-700' : 'text-slate-500 hover:text-blue-600 hover:bg-slate-50'}`}
-                                title="跳转至句段"
+                        <div className="flex flex-col shrink-0 rounded-md border border-slate-200 bg-slate-100 overflow-hidden">
+                            <button
+                                type="button"
+                                onClick={goToFirstFilteredSegment}
+                                disabled={viewSegments.length === 0}
+                                className="p-0.5 text-slate-500 hover:text-blue-600 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed border-b border-slate-200 transition-colors"
+                                title="跳至筛选首句 (Ctrl+Home)"
                             >
-                                <Icons.Jump className="w-4 h-4" />
+                                <Icons.ArrowUpToLine className="w-3.5 h-3.5" />
                             </button>
-                            
-                            {showJumpInput && (
-                                <form 
-                                    onSubmit={handleJumpToSegment}
-                                    className="absolute top-full left-0 mt-2 bg-white border border-slate-200 shadow-xl rounded-lg p-2 flex items-center gap-1 z-50 animate-in fade-in slide-in-from-top-1"
-                                >
-                                    <span className="text-xs text-slate-400 font-mono">#</span>
-                                    <input 
-                                        ref={jumpInputRef}
-                                        type="number" 
-                                        className="w-16 px-2 py-1 text-xs border border-slate-200 rounded outline-none focus:border-blue-400"
-                                        value={jumpInput}
-                                        onChange={(e) => setJumpInput(e.target.value)}
-                                        onKeyDown={(e) => {
-                                            if(e.key === 'Escape') setShowJumpInput(false);
-                                        }}
-                                    />
-                                    <button type="submit" className="p-1 bg-blue-50 text-blue-600 rounded hover:bg-blue-100">
-                                        <Icons.ChevronRight className="w-3 h-3" />
-                                    </button>
-                                </form>
-                            )}
+                            <button
+                                type="button"
+                                onClick={goToLastFilteredSegment}
+                                disabled={viewSegments.length === 0}
+                                className="p-0.5 text-slate-500 hover:text-blue-600 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                                title="跳至筛选末句 (Ctrl+End)"
+                            >
+                                <Icons.ArrowDownToLine className="w-3.5 h-3.5" />
+                            </button>
                         </div>
 
-                        <div className="h-4 w-px bg-slate-300 mx-2"/>
-                        
-                        {/* NEW BUTTON: Copy Source */}
-                        <button 
-                            onClick={handleCopySourceToTarget}
-                            disabled={!activeSegmentId || activeSegment?.isLocked}
-                            className="p-2 bg-slate-50 text-slate-600 hover:bg-slate-100 rounded-md transition-colors shadow-sm border border-slate-200 disabled:opacity-50"
-                            title="复制原文到译文 (Copy Source)"
-                        >
-                            <Icons.Copy className="w-4 h-4" />
-                        </button>
-                        
+                        <div className="flex items-center gap-0.5 shrink-0">
+                            <button
+                                type="button"
+                                onClick={() => setIsReplaceModalOpen(true)}
+                                className="p-1.5 text-slate-500 hover:text-blue-600 hover:bg-slate-50 rounded-md transition-colors"
+                                title="查找与替换 (仅译文)"
+                            >
+                                <Icons.Translate className="w-4 h-4" />
+                            </button>
+
+                            <div className="relative">
+                                <button
+                                    type="button"
+                                    onClick={() => setShowJumpInput(!showJumpInput)}
+                                    className={`p-1.5 rounded-md transition-colors ${
+                                        showJumpInput
+                                            ? 'bg-slate-100 text-slate-700'
+                                            : 'text-slate-500 hover:text-blue-600 hover:bg-slate-50'
+                                    }`}
+                                    title="跳转至句段"
+                                >
+                                    <Icons.Jump className="w-4 h-4" />
+                                </button>
+
+                                {showJumpInput && (
+                                    <form
+                                        onSubmit={handleJumpToSegment}
+                                        className="absolute top-full left-0 mt-2 bg-white border border-slate-200 shadow-xl rounded-lg p-2 flex items-center gap-1 z-50 animate-in fade-in slide-in-from-top-1"
+                                    >
+                                        <span className="text-xs text-slate-400 font-mono">#</span>
+                                        <input
+                                            ref={jumpInputRef}
+                                            type="number"
+                                            className="w-16 px-2 py-1 text-xs border border-slate-200 rounded outline-none focus:border-blue-400"
+                                            value={jumpInput}
+                                            onChange={(e) => setJumpInput(e.target.value)}
+                                            onKeyDown={(e) => {
+                                                if (e.key === 'Escape') setShowJumpInput(false);
+                                            }}
+                                        />
+                                        <button type="submit" className="p-1 bg-blue-50 text-blue-600 rounded hover:bg-blue-100">
+                                            <Icons.ChevronRight className="w-3 h-3" />
+                                        </button>
+                                    </form>
+                                )}
+                            </div>
+
+                            <button
+                                type="button"
+                                onClick={handleCopySourceToTarget}
+                                disabled={!activeSegmentId || activeSegment?.isLocked}
+                                className="p-1.5 text-slate-500 hover:text-blue-600 hover:bg-slate-50 rounded-md transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                                title="复制原文到译文 (Copy Source)"
+                            >
+                                <Icons.Copy className="w-4 h-4" />
+                            </button>
+                        </div>
+
                         <div className="h-4 w-px bg-slate-300 mx-1"/>
 
                         {/* Batch Pre-Translate Button */}
@@ -5358,11 +5636,14 @@ export const Editor: React.FC<EditorProps> = ({
                         <div className="h-4 w-px bg-slate-300 mx-1"/>
 
                         <button 
-                            onClick={handleRunFullQA} 
-                            className="p-2 bg-blue-50 text-blue-600 hover:bg-blue-100 rounded-md transition-colors"
-                            title="本地 QA 检查 (Local QA)"
+                            onClick={() => { void handleRunFullQA(); }}
+                            disabled={isLocalQAProcessing}
+                            className="p-2 bg-blue-50 text-blue-600 hover:bg-blue-100 rounded-md transition-colors disabled:opacity-50"
+                            title={isLocalQAProcessing
+                                ? `本地 QA 检查中… ${localQaProgress.current}/${localQaProgress.total}`
+                                : '本地 QA 检查 (Local QA)'}
                         >
-                            <Icons.QA className="w-4 h-4" />
+                            <Icons.QA className={`w-4 h-4 ${isLocalQAProcessing ? 'animate-pulse' : ''}`} />
                         </button>
 
                         <button 
@@ -5593,7 +5874,6 @@ export const Editor: React.FC<EditorProps> = ({
                             )}
                         </div>
                    </div>
-               </div>
                
                <div className="flex items-center gap-2">
                     
@@ -5612,7 +5892,7 @@ export const Editor: React.FC<EditorProps> = ({
                     : 'overflow-y-auto'
                 }`}
             >
-                {filteredSegments.length > 0 ? (
+                {viewSegments.length > 0 ? (
                     <>
                         {editorLayoutMode === 'focus' && (
                             <div
@@ -5632,12 +5912,12 @@ export const Editor: React.FC<EditorProps> = ({
                                     <Icons.ChevronLeft className="w-4 h-4" />
                                 </button>
                                 <span className="text-xs font-mono text-slate-600 tabular-nums min-w-[4.5rem] text-center">
-                                    {focusResolved.indexInFiltered + 1} / {filteredSegments.length}
+                                    {focusResolved.indexInFiltered + 1} / {viewSegments.length}
                                 </span>
                                 <button
                                     type="button"
                                     onClick={goToNextFilteredSegment}
-                                    disabled={focusResolved.indexInFiltered >= filteredSegments.length - 1}
+                                    disabled={focusResolved.indexInFiltered >= viewSegments.length - 1}
                                     className="p-2 rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed shadow-sm"
                                     title="下一句（Alt+↓）"
                                 >
@@ -5654,7 +5934,7 @@ export const Editor: React.FC<EditorProps> = ({
                               <List
                                 listRef={comparisonListRef}
                                 rowHeight={dynamicRowHeight}
-                                rowCount={filteredSegments.length}
+                                rowCount={viewSegments.length}
                                 rowComponent={ComparisonVirtualRow}
                                 rowProps={comparisonRowProps}
                                 onRowsRendered={onComparisonRowsRendered}
@@ -5809,7 +6089,7 @@ export const Editor: React.FC<EditorProps> = ({
 
                         <button
                             type="button"
-                            onClick={() => void handleBatchTranslateSelection()}
+                            onClick={() => openBatchScopeModal('translate')}
                             disabled={isSelectionBatchTranslating || isAiProcessing}
                             className="shrink-0 p-2 hover:bg-slate-800 rounded-lg transition-colors flex flex-col items-center gap-0.5 group disabled:opacity-40 disabled:pointer-events-none"
                             title="对选中未锁定句段执行 AI 翻译（先应用已挂载正则/规则词典）"
@@ -5959,6 +6239,17 @@ export const Editor: React.FC<EditorProps> = ({
                                                 const isFirstMatch = idx === 0;
                                                 const collapsed = isMatchCollapsed(matchKey);
                                                 const expanded = isFirstMatch ? !collapsed : collapsed;
+                                                const isDuplicateHit = tm.tmId === '__duplicate__';
+                                                const isMainHit =
+                                                    !isDuplicateHit &&
+                                                    !!mainTM &&
+                                                    (tm.tmId === mainTM.id || tm.sourceTM === mainTM.name);
+                                                const tmRoleLabel = isDuplicateHit ? '重复' : isMainHit ? '主' : '参考';
+                                                const tmRoleClass = isDuplicateHit
+                                                    ? 'bg-violet-100 text-violet-700'
+                                                    : isMainHit
+                                                      ? 'bg-blue-100 text-blue-700'
+                                                      : 'bg-slate-200 text-slate-600';
                                                 
                                                 return (
                                                     <div 
@@ -5985,12 +6276,29 @@ export const Editor: React.FC<EditorProps> = ({
                                                                 {expanded ? '收起' : '展开'}
                                                             </button>
                                                         </div>
-                                                        <div className="mt-1 flex justify-between text-slate-400 items-center">
-                                                            <div className="flex gap-1.5">
-                                                                <span>{tm.usageCount} 次</span>
-                                                                {tm.sourceTM && <span className="bg-slate-200 px-1 rounded truncate max-w-[80px] text-slate-600">{tm.sourceTM}</span>}
+                                                        <div className="mt-1 flex justify-between text-slate-400 items-center gap-2">
+                                                            <div className="flex min-w-0 items-center gap-1.5">
+                                                                <span
+                                                                    className={`shrink-0 rounded px-1 text-[10px] font-semibold ${tmRoleClass}`}
+                                                                    title={isDuplicateHit ? '来自文件内重复句' : isMainHit ? '来自主记忆库（可更新）' : '来自参考记忆库'}
+                                                                >
+                                                                    {tmRoleLabel}
+                                                                </span>
+                                                                {tm.sourceTM && (
+                                                                    <span
+                                                                        className="truncate text-slate-600"
+                                                                        title={tm.sourceTM}
+                                                                    >
+                                                                        {tm.sourceTM}
+                                                                    </span>
+                                                                )}
+                                                                {tm.usageCount > 0 && (
+                                                                    <span className="shrink-0 text-slate-400" title="该记忆条目被使用次数">
+                                                                        · 已用 {tm.usageCount}
+                                                                    </span>
+                                                                )}
                                                             </div>
-                                                            <span className={`${tm.score >= 100 ? 'text-green-600 font-bold' : tm.score >= 70 ? 'text-orange-500 font-semibold' : 'text-slate-400'}`}>
+                                                            <span className={`shrink-0 ${tm.score >= 100 ? 'text-green-600 font-bold' : tm.score >= 70 ? 'text-orange-500 font-semibold' : 'text-slate-400'}`}>
                                                                 {tm.score}%
                                                             </span>
                                                         </div>
@@ -7721,6 +8029,21 @@ export const Editor: React.FC<EditorProps> = ({
                 </div>
             </div>,
             document.body
+        )}
+
+        {batchScopeModal && (
+            <BatchSegmentScopeModal
+                open
+                operation={batchScopeModal.operation}
+                selectedCount={selectedSegmentIds.size}
+                filteredCount={viewSegments.length}
+                allCount={allScopeSegmentCount}
+                onClose={() => setBatchScopeModal(null)}
+                onConfirm={(scope) => void handleBatchScopeConfirm(scope)}
+                confirming={
+                    batchScopeModal.operation === 'translate' && isSelectionBatchTranslating
+                }
+            />
         )}
 
         {twinLearningCapModal && (

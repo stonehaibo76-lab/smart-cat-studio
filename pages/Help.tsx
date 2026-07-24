@@ -119,7 +119,7 @@ const OverviewSection = () => {
           <FeatureCard
             icon={Icons.File}
             title="多格式支持"
-            description="项目可导入 TXT、DOCX、PPTX、Excel、SDLXLIFF、MQXLIFF、MQXLZ、SDLPPX/SDLRPX；导出 Excel、TMX、原文格式（纯译文 / 段段对照 / 并列对照 DOCX / PPTX），以及可回写 Trados/memoQ 的双语 XLIFF 或回传包。"
+            description="项目可导入 TXT、DOCX、PPTX、Excel（.xlsx，Okapi 保真）、SDLXLIFF、MQXLIFF、MQXLZ、SDLPPX/SDLRPX；导出 Excel 对照表、TMX、原文格式（纯译文 DOCX/PPTX/XLSX/TXT/HTML，及 DOCX 段段/并列对照），以及可回写 Trados/memoQ 的双语 XLIFF 或回传包。"
           />
           <FeatureCard
             icon={Icons.Brain}
@@ -226,7 +226,7 @@ const WhatsNewSection = () => {
             </li>
             <li className="flex gap-2">
               <Icons.Check className="w-4 h-4 text-teal-600 flex-shrink-0 mt-0.5" />
-              <span><strong className="text-slate-900">PPTX 格式保留</strong>：通过 Okapi 侧车（8090）导入 / 导出 PowerPoint，保留字符级样式；原文格式导出写回 .pptx。</span>
+              <span><strong className="text-slate-900">Office 格式保留</strong>：单语 DOCX 由 Python 侧车（8090）导入/导出，保留段落、表格与文本框 run 级样式；PPTX / XLSX 通过 Java Okapi（8091，<code className="bg-white/80 px-1 rounded">okf_openxml</code>）；PPTX 导出后可调译文字号缩放；HTML/TXT 仍由 Python 侧车处理。</span>
             </li>
             <li className="flex gap-2">
               <Icons.Check className="w-4 h-4 text-teal-600 flex-shrink-0 mt-0.5" />
@@ -234,7 +234,7 @@ const WhatsNewSection = () => {
             </li>
             <li className="flex gap-2">
               <Icons.Check className="w-4 h-4 text-teal-600 flex-shrink-0 mt-0.5" />
-              <span>本地开发请使用根目录 <code className="bg-white/80 px-1 rounded">启动Smart CAT Studio V 1.8.1.bat</code> 一并启动 Okapi、数据库与前端。</span>
+              <span>本地开发请使用根目录 <code className="bg-white/80 px-1 rounded">启动Smart CAT Studio V 1.8.3.1.bat</code> 一并启动 Okapi、数据库与前端。</span>
             </li>
           </ul>
         </div>
@@ -251,7 +251,7 @@ const WhatsNewSection = () => {
           <ul className="space-y-2 text-slate-700 text-sm">
             <li className="flex gap-2">
               <Icons.Check className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
-              <span><strong className="text-slate-900">原文格式导出</strong>：纯译文在原 DOCX / PPTX / TXT / HTML 上写回译文并保留版式；DOCX 另支持段段对照、并列对照双语导出（仿云译客 iCAT），多文件打包为 ZIP。</span>
+              <span><strong className="text-slate-900">原文格式导出</strong>：纯译文在原 DOCX / PPTX / XLSX / TXT / HTML 上写回译文并保留版式；DOCX 另支持段段对照、并列对照双语导出（仿云译客 iCAT），多文件打包为 ZIP。</span>
             </li>
             <li className="flex gap-2">
               <Icons.Check className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
@@ -267,7 +267,7 @@ const WhatsNewSection = () => {
             </li>
             <li className="flex gap-2">
               <Icons.Check className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
-              <span>导入时自动保存原文件副本；{cloud ? '云端 API 内置 Okapi，纯译文导出需有原文件备份。' : '纯译文导出需本机 Okapi 侧车（8090）运行。'}</span>
+              <span>导入时自动保存原文件副本；{cloud ? '云端 API 内置双 Okapi 侧车，Office 纯译文导出需 Java 侧车就绪且有原文件备份。' : 'Office 纯译文导出需 Java Okapi 侧车（8091）运行；HTML/TXT 需 Python 侧车（8090）。'}</span>
             </li>
           </ul>
         </div>
@@ -375,7 +375,7 @@ const QuickStartSection = () => (
       <StepCard
         step={2}
         title="导入翻译文件"
-        description="在向导第 2 步上传需要翻译的文件：TXT、DOCX、PPTX、Excel（.xlsx / .xls）；Trados 的 .sdlxliff / .sdlppx / .sdlrpx；memoQ 的 .mqxliff / .mqxlz（压缩包，内含 MQXLIFF 与 skeleton.xml）。DOCX / PPTX 导入时会保存原文件并提取 run 级格式（PPTX 含演讲者备注，需 Okapi 侧车）；XLIFF 会保留句段 ID 以便回写；SDLXLIFF 在编辑器中以 <标签ID> 形式显示内联标记。"
+        description="在向导第 2 步上传需要翻译的文件：TXT、DOCX、PPTX、Excel（.xlsx，需 Java Okapi 8091）；Trados 的 .sdlxliff / .sdlppx / .sdlrpx；memoQ 的 .mqxliff / .mqxlz。单语 DOCX/PPTX/XLSX 由 Java Okapi 提取并保存原文件；双语 CAT DOCX（表格/段段）仍用浏览器解析；HTML/TXT 由 Python 侧车（8090）提取；XLIFF 保留句段 ID 以便回写。"
         icon={Icons.Upload}
       />
       <StepCard
@@ -393,7 +393,7 @@ const QuickStartSection = () => (
       <StepCard
         step={5}
         title="导出翻译结果"
-        description="翻译完成后可导出 Excel、TMX；XLIFF 项目可导出 SDLXLIFF / MQXLIFF，或 Trados SDLRPX / memoQ MQXLZ 回传包。DOCX / PPTX / TXT / HTML 可选「原文格式」纯译文（保真）；DOCX 另支持段段对照、并列对照双语导出（仿云译客 iCAT）。"
+        description="翻译完成后可导出 Excel 对照表、TMX；XLIFF 项目可导出 SDLXLIFF / MQXLIFF 或 Trados / memoQ 回传包。DOCX / PPTX / XLSX / TXT / HTML 可选「原文格式」纯译文（保真）；DOCX 另支持段段对照、并列对照双语导出。"
         icon={Icons.Download}
       />
     </div>
@@ -615,7 +615,8 @@ const EditorSection = () => (
             <strong className="text-slate-900">导出</strong>
             <ul className="mt-2 space-y-1">
               <li>• 点击右上角「导出」→「原文格式」→ 选择纯译文（保真）、段段对照或并列对照；段段对照可选「原文在上/译文在上」。</li>
-              <li>• {cloud ? '纯译文（保真）由云端 API 内置 Okapi 处理；' : '纯译文需在本地版运行 Okapi 侧车（8090）；'}段段/并列对照双语 DOCX 可在浏览器直接下载。</li>
+              <li>• {cloud ? 'Office 纯译文（保真）由云端 Java Okapi 侧车处理；' : 'Office 纯译文需 Java Okapi 侧车（8091）；HTML/TXT 需 Python 侧车（8090）。'}段段/并列对照双语 DOCX 可在浏览器直接下载。</li>
+              <li>• PPTX 纯译文导出可调「译文字号缩放」（默认 70%）：Java 写回后由 Python 侧车缩小字号，缓解中译英出框；标题页可试 50%-70%。</li>
               <li>• 若纯译文不可用，请重新导入文档（导入时会保存原文件备份）。</li>
             </ul>
           </div>
@@ -1766,7 +1767,7 @@ const FAQSection = () => {
     },
     {
       question: "支持哪些文件格式？",
-      answer: "新建项目时支持导入 TXT、DOCX、PPTX 以及 Excel（.xlsx / .xls）：表格至少两列时按「原文 / 译文」拆成句段，单列则每行作为原文句段。DOCX / PPTX 会保存原文件并提取字符级格式（PPTX 需 Okapi 侧车）。导出支持 Excel (.xlsx)、TMX、原文格式（纯译文 DOCX/PPTX/TXT/HTML，及 DOCX 段段/并列对照），以及 SDLXLIFF / MQXLIFF / SDLRPX / MQXLZ 等 CAT 回写格式。"
+      answer: "新建项目时支持导入 TXT、DOCX、PPTX 以及 Excel（.xlsx）：单语 Office 三格式通过 Java Okapi 侧车（8091）提取可译单元并保存原文件，导出时可选「原文格式」写回保真译文，或「Excel 文件」导出双语对照表。双语 CAT DOCX（表格/段段）仍由浏览器解析。HTML/TXT 由 Python 侧车（8090）处理。另支持 TMX、SDLXLIFF / MQXLIFF / SDLRPX / MQXLZ 等 CAT 格式。旧版 .xls 不支持，请另存为 .xlsx。"
     },
     {
       question: "翻译记忆库和术语库有什么区别？",
@@ -1805,8 +1806,8 @@ const FAQSection = () => {
     {
       question: "如何导出翻译结果？",
       answer: cloud
-        ? "在翻译编辑页面点击右上角「导出」：可选 Excel、TMX、原文格式（纯译文 DOCX/PPTX/TXT/HTML，及 DOCX 段段/并列对照）、SDLXLIFF / MQXLIFF / SDLRPX / MQXLZ 等（视项目文件类型而定）。MQXLZ 回传包会将包内 MQXLIFF 写回译文并保留 skeleton.xml，供 memoQ 导入交稿。纯译文在原文件上写回并保留版式，需导入时已保存原文件备份，由云端 API 内置 Okapi 处理；双语对照 DOCX 可在浏览器直接生成。可勾选「仅导出已确认句段」。"
-        : "在翻译编辑页面点击右上角「导出」：可选 Excel、TMX、原文格式（纯译文 DOCX/PPTX/TXT/HTML，及 DOCX 段段/并列对照）、SDLXLIFF / MQXLIFF / SDLRPX / MQXLZ 等（视项目文件类型而定）。MQXLZ 回传包会将包内 MQXLIFF 写回译文并保留 skeleton.xml，供 memoQ 导入交稿。纯译文在原文件上写回并保留版式，需 Okapi 侧车；双语对照 DOCX 可在浏览器直接生成。可勾选「仅导出已确认句段」。"
+        ? "在翻译编辑页面点击右上角「导出」：可选 Excel 对照表、TMX、原文格式（纯译文 DOCX/PPTX/XLSX/TXT/HTML，及 DOCX 段段/并列对照）、SDLXLIFF / MQXLIFF / SDLRPX / MQXLZ 等。Office 纯译文由云端 Java Okapi 侧车 merge；需导入时已保存原文件备份。可勾选「仅导出已确认句段」。"
+        : "在翻译编辑页面点击右上角「导出」：可选 Excel 对照表、TMX、原文格式（纯译文 DOCX/PPTX/XLSX/TXT/HTML，及 DOCX 段段/并列对照）、SDLXLIFF / MQXLIFF / SDLRPX / MQXLZ 等。Office 纯译文需 Java Okapi 侧车（8091）；HTML/TXT 需 Python 侧车（8090）。可勾选「仅导出已确认句段」。"
     },
     {
       question: "能否跨项目复用记忆库和术语库？",

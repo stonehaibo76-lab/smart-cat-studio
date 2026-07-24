@@ -87,7 +87,7 @@ export function targetFontForBilingualPair(pair: BilingualExportFontPair): WordF
   };
 }
 
-export type OriginalFormatKind = 'docx' | 'txt' | 'html' | 'pptx';
+export type OriginalFormatKind = 'docx' | 'txt' | 'html' | 'pptx' | 'xlsx';
 
 export function supportsOriginalFormatExport(fileName: string): boolean {
   const lower = fileName.toLowerCase();
@@ -96,7 +96,8 @@ export function supportsOriginalFormatExport(fileName: string): boolean {
     lower.endsWith('.txt') ||
     lower.endsWith('.html') ||
     lower.endsWith('.htm') ||
-    lower.endsWith('.pptx')
+    lower.endsWith('.pptx') ||
+    lower.endsWith('.xlsx')
   );
 }
 
@@ -110,6 +111,7 @@ export function getOriginalFormatKind(fileName: string): OriginalFormatKind | nu
   if (lower.endsWith('.txt')) return 'txt';
   if (lower.endsWith('.html') || lower.endsWith('.htm')) return 'html';
   if (lower.endsWith('.pptx')) return 'pptx';
+  if (lower.endsWith('.xlsx')) return 'xlsx';
   return null;
 }
 
@@ -131,6 +133,8 @@ export function monolingualExportStyleLabel(kind: OriginalFormatKind | 'mixed' |
   switch (kind) {
     case 'pptx':
       return '纯译文（保真 PowerPoint 版式）';
+    case 'xlsx':
+      return '纯译文（保真 Excel 版式）';
     case 'docx':
       return '纯译文（保真 Word 版式）';
     case 'html':
@@ -147,15 +151,17 @@ export function monolingualExportStyleLabel(kind: OriginalFormatKind | 'mixed' |
 export function monolingualExportStyleHint(kind: OriginalFormatKind | 'mixed' | null): string {
   switch (kind) {
     case 'pptx':
-      return '在原 PPTX 上写回译文，保留幻灯片版式与字符样式。';
+      return '在原 PPTX 上写回译文，保留幻灯片版式与字符样式（Java Okapi merge）。';
+    case 'xlsx':
+      return '在原 XLSX 上写回译文，保留工作表、单元格与格式（Java Okapi merge）。';
     case 'docx':
-      return '在原 DOCX 上写回译文，保留版式与字符样式。';
+      return '在原 DOCX 上写回译文，保留版式与字符样式（Python 保真 merge）。';
     case 'html':
       return '在原 HTML 上写回译文，保留页面结构与字符样式。';
     case 'txt':
       return '在原 TXT 上按行写回译文。';
     case 'mixed':
-      return '在原 DOCX / PPTX / TXT / HTML 上写回译文，保留版式与字符样式。';
+      return '在原 DOCX / PPTX / XLSX / TXT / HTML 上写回译文，保留版式与字符样式。';
     default:
       return '在原文件上写回译文，保留版式与字符样式。';
   }
@@ -214,4 +220,51 @@ export function inferDefaultOriginalDocxMode(file: {
     return file.docxBilingualLayout;
   }
   return 'interleaved';
+}
+
+export function isJavaOfficeFileName(fileName: string): boolean {
+  const kind = getOriginalFormatKind(fileName);
+  return kind === 'docx' || kind === 'pptx' || kind === 'xlsx';
+}
+
+/** Office mono export requires matching import engine per format. */
+export function canJavaOfficeMonoExport(file: {
+  name: string;
+  importEngine?: 'okapi-java' | 'okapi-python' | 'docx-ts';
+  docxImportMode?: 'bilingual' | 'monolingual';
+}): boolean {
+  if (!isJavaOfficeFileName(file.name)) return true;
+  if (file.docxImportMode === 'bilingual') return false;
+  const kind = getOriginalFormatKind(file.name);
+  if (kind === 'docx') return file.importEngine === 'okapi-python';
+  if (kind === 'pptx' || kind === 'xlsx') return file.importEngine === 'okapi-java';
+  return true;
+}
+
+export function monoExportBlockedReason(file: {
+  name: string;
+  importEngine?: 'okapi-java' | 'okapi-python' | 'docx-ts';
+  docxImportMode?: 'bilingual' | 'monolingual';
+}): string | null {
+  if (file.docxImportMode === 'bilingual' && file.name.toLowerCase().endsWith('.docx')) {
+    return '双语 DOCX 项目请使用段段对照或并列对照导出；单语保真请重新导入客户原稿。';
+  }
+  const kind = getOriginalFormatKind(file.name);
+  if (kind === 'docx' && file.docxImportMode !== 'bilingual') {
+    if (file.importEngine === 'okapi-java') {
+      return '该 DOCX 为旧版 Java 导入，请重新导入后再保真导出（现使用 Python 保真引擎）。';
+    }
+    if (file.importEngine !== 'okapi-python') {
+      return '该 DOCX 缺少 Python 保真导入元数据，请重新导入后再导出。';
+    }
+  }
+  if ((kind === 'pptx' || kind === 'xlsx') && file.importEngine !== 'okapi-java') {
+    return '该 Office 文件缺少 Okapi 导入元数据，请重新导入后再保真导出。';
+  }
+  return null;
+}
+
+/** Okapi merge preserves original Office styling; font/scale options do not apply. */
+export function usesOkapiOfficeMonoExport(kind: OriginalFormatKind | 'mixed' | null): boolean {
+  return kind === 'docx' || kind === 'pptx' || kind === 'xlsx' || kind === 'mixed';
 }

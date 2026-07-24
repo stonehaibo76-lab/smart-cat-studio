@@ -1,9 +1,9 @@
 import { Project, SegmentStatus, MatchType, TermBase, TranslationMemory, ProjectFile, EditorQuickSymbol } from './types';
 
 /** 界面与帮助文档中统一展示的发行版标签（含 V 前缀） */
-export const APP_DISPLAY_VERSION = 'V1.8.1';
+export const APP_DISPLAY_VERSION = 'V1.8.3.1';
 /** TMX creationtoolversion 等元数据（不含 V） */
-export const APP_VERSION_METADATA = '1.8.1';
+export const APP_VERSION_METADATA = '1.8.3.1';
 
 /** 术语库/记忆库无创建日期时的侧栏展示 */
 export const RESOURCE_CREATED_DATE_FALLBACK_CN = '2026年4月24日';
@@ -29,6 +29,7 @@ export const SUPPORTED_LANGUAGES = [
   { code: 'es-ES', name: 'Spanish' },
   { code: 'de-DE', name: 'German' },
   { code: 'ru-RU', name: 'Russian' },
+  { code: 'uk-UA', name: 'Ukrainian' },
   { code: 'it-IT', name: 'Italian' },
   { code: 'pt-BR', name: 'Portuguese (Brazil)' },
   { code: 'vi-VN', name: 'Vietnamese' },

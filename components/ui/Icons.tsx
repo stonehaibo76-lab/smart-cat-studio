@@ -56,7 +56,10 @@ import {
   Globe,
   Bookmark,
   ExternalLink,
-  Brackets
+  Brackets,
+  CaseSensitive,
+  ArrowUpToLine,
+  ArrowDownToLine
 } from 'lucide-react';
 
 export const Icons = {
@@ -121,5 +124,8 @@ export const Icons = {
   Globe: Globe,
   Bookmark: Bookmark,
   ExternalLink: ExternalLink,
-  RegexDict: Brackets
+  RegexDict: Brackets,
+  CaseSensitive: CaseSensitive,
+  ArrowUpToLine: ArrowUpToLine,
+  ArrowDownToLine: ArrowDownToLine
 };

@@ -1,7 +1,7 @@
 @echo off
 setlocal EnableExtensions
 REM Portable one-click launcher (ASCII-only for cmd.exe compatibility).
-title Smart-CAT Studio Portable V1.8.2
+title Smart-CAT Studio Portable V1.8.3.1
 cd /d "%~dp0"
 
 if not exist "%~dp0runtime\node\node.exe" (

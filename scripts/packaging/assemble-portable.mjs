@@ -333,7 +333,7 @@ function assembleStaging(nodeDir, pythonDir) {
 
   fs.writeFileSync(
     path.join(STAGING, 'README-PORTABLE.txt'),
-    `Smart-CAT Studio V1.8.1 Portable
+    `Smart-CAT Studio V${MANIFEST.productVersion} Portable
 ================================
 
 1. Extract this ZIP to a normal folder (not a cloud-sync folder).

@@ -1,6 +1,6 @@
 import React, { useMemo } from 'react';
 import type { TermBaseEntry } from '../types';
-import { collectTermHitSpans } from '../services/termQaMatch';
+import { collectUniqueTermHitSpans } from '../services/termQaMatch';
 
 function isForbiddenTerm(term: TermBaseEntry): boolean {
   const ctx = (term.context || '').toLowerCase();
@@ -22,7 +22,7 @@ export const TermLensRow: React.FC<TermLensRowProps> = ({
   className = '',
 }) => {
   const hits = useMemo(
-    () => collectTermHitSpans(sourceText, terms, false),
+    () => collectUniqueTermHitSpans(sourceText, terms, false),
     [sourceText, terms]
   );
 
@@ -30,11 +30,11 @@ export const TermLensRow: React.FC<TermLensRowProps> = ({
 
   return (
     <div className={`flex flex-wrap gap-1 px-3 pb-2 pt-0.5 ${className}`}>
-      {hits.map((hit, i) => {
+      {hits.map((hit) => {
         const forbidden = isForbiddenTerm(hit.term);
         return (
           <button
-            key={`${hit.start}-${hit.term.id}-${i}`}
+            key={hit.term.id}
             type="button"
             title={
               forbidden

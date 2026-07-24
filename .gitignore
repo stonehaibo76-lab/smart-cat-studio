@@ -19,6 +19,7 @@ smartcat-db-path.json
 .env.*
 !.env.example
 .venv
+runtime/jre/
 
 # Editor directories and files
 .vscode/*

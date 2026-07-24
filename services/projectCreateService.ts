@@ -1,4 +1,3 @@
-import * as XLSX from 'xlsx';
 import {
   Project,
   SegmentStatus,
@@ -7,10 +6,20 @@ import {
   TranslationMemory,
   ProjectFile,
   Segment,
+  TranslationSegmentationMode,
 } from '../types';
 import { shouldAutoLockSegmentAtImport } from './segmentAutoLock';
-import { parseDocxForImport } from './catInterop/bilingualDocxHandler';
+import {
+  applySegmentationToExtractedSegments,
+  resolveSegmentationMode,
+  splitPlainTextToSources,
+} from './translationSegmentation';
+import {
+  parseBilingualDocx,
+  isLikelyBilingualDocxFileName,
+} from './catInterop/bilingualDocxHandler';
 import { newSourceBlobId, saveSourceBlob } from './catInterop/sourceBlobStore';
+import { parseSimpleXlsx, type SimpleXlsxSegment } from './catInterop/xlsxImport';
 import { okapiExtractFile, isOkapiCandidateFile } from './okapiClient';
 import {
   parseXliffFile,
@@ -29,11 +38,13 @@ export type UploadedFilePayload = {
     source: string;
     target: string;
     okapiTuId?: string;
+    okapiSegmentIndex?: number;
     inlineRunMeta?: import('../types').InlineRunStyle[];
   }>;
   sourceBlobId?: string;
   docxImportMode?: 'bilingual' | 'monolingual';
   docxBilingualLayout?: 'table' | 'interleaved';
+  importEngine?: 'okapi-java' | 'okapi-python' | 'docx-ts';
   isXliff?: boolean;
   xliffProject?: ParsedXliffProject;
 };
@@ -46,14 +57,135 @@ function canReadAsTextFallback(fileName: string): boolean {
   return OKAPI_TEXT_FALLBACK_EXTENSIONS.some((ext) => lower.endsWith(ext));
 }
 
+export type ParseProjectFileOptions = {
+  sourceLang?: string;
+  targetLang?: string;
+  segmentationMode?: TranslationSegmentationMode;
+};
+
+function processExtractedSegments<T extends { source: string; target?: string; okapiTuId?: string; okapiSegmentIndex?: number; inlineRunMeta?: import('../types').InlineRunStyle[]; id?: string }>(
+  segments: T[],
+  opts?: ParseProjectFileOptions
+): T[] {
+  return applySegmentationToExtractedSegments(segments, resolveSegmentationMode(opts?.segmentationMode));
+}
+
 function buildOkapiExtractError(fileName: string, extractedError?: string): string {
   const lower = fileName.toLowerCase();
-  const pptxHint =
-    '请关闭 SmartCAT-Okapi 窗口后重新运行启动脚本（或 scripts/start-okapi-sidecar.cmd），以加载 PPTX 解析模块。';
-  const genericHint = '请确认 Okapi 侧车（http://127.0.0.1:8090）与本地 DB 服务（58741）均已启动。';
-  const hint = lower.endsWith('.pptx') ? pptxHint : genericHint;
+  const docxHint =
+    '请确认 Python Okapi 侧车（http://127.0.0.1:8090）与本地 DB 服务（58741）均已启动。';
+  const officeHint =
+    '请确认 Java Okapi 侧车（http://127.0.0.1:8091）已启动：scripts/start-okapi-java-sidecar.cmd，并安装 Java 17+ 或使用便携版 bundled JRE。';
+  const genericHint =
+    '请确认 Okapi 侧车（http://127.0.0.1:8090）与本地 DB 服务（58741）均已启动。';
+  const hint = lower.endsWith('.docx')
+    ? docxHint
+    : lower.endsWith('.pptx') || lower.endsWith('.xlsx')
+      ? officeHint
+      : genericHint;
   if (extractedError?.trim()) return `${extractedError.trim()} ${hint}`;
   return `无法从 ${fileName} 提取句段。${hint}`;
+}
+
+function buildPythonDocxImportPayload(
+  fileName: string,
+  sourceBlobId: string,
+  extracted: { segments: Array<{
+    id: string;
+    source: string;
+    target?: string;
+    okapiTuId?: string;
+    inlineRunMeta?: import('../types').InlineRunStyle[];
+  }> }
+): UploadedFilePayload {
+  return {
+    name: fileName,
+    content: extracted.segments.map((s) => s.source).join('\n'),
+    isExcel: true,
+    sourceBlobId,
+    importEngine: 'okapi-python',
+    docxImportMode: 'monolingual',
+    segments: extracted.segments.map((s) => ({
+      source: s.source,
+      target: s.target || '',
+      okapiTuId: s.okapiTuId ?? s.id,
+      okapiSegmentIndex: 0,
+      inlineRunMeta: s.inlineRunMeta,
+    })),
+  };
+}
+
+function buildSimpleXlsxImportPayload(
+  fileName: string,
+  sourceBlobId: string,
+  segments: SimpleXlsxSegment[]
+): UploadedFilePayload {
+  return {
+    name: fileName,
+    content: segments.map((s) => s.source).join('\n'),
+    isExcel: true,
+    sourceBlobId,
+    segments: segments.map((s) => ({
+      source: s.source,
+      target: s.target,
+    })),
+  };
+}
+
+async function parseXlsxProjectFile(
+  file: File,
+  opts?: ParseProjectFileOptions
+): Promise<UploadedFilePayload> {
+  const arrayBuffer = await file.arrayBuffer();
+  const sourceBlobId = newSourceBlobId();
+  await saveSourceBlob(sourceBlobId, arrayBuffer);
+
+  const extracted = await okapiExtractFile(file, undefined, {
+    sourceLang: opts?.sourceLang,
+    targetLang: opts?.targetLang,
+    segmentationMode: opts?.segmentationMode,
+  });
+  if (extracted.ok && extracted.segments?.length) {
+    const processed = processExtractedSegments(extracted.segments, opts);
+    return buildOkapiJavaImportPayload(file.name, sourceBlobId, { segments: processed });
+  }
+
+  const simple = parseSimpleXlsx(arrayBuffer);
+  if (simple?.length) {
+    return buildSimpleXlsxImportPayload(file.name, sourceBlobId, simple);
+  }
+
+  throw new Error(buildOkapiExtractError(file.name, extracted.error));
+}
+
+function buildOkapiJavaImportPayload(
+  fileName: string,
+  sourceBlobId: string,
+  extracted: { segments: Array<{
+    id: string;
+    source: string;
+    target?: string;
+    okapiTuId?: string;
+    okapiSegmentIndex?: number;
+    inlineRunMeta?: import('../types').InlineRunStyle[];
+  }> },
+  extra?: { docxImportMode?: 'monolingual' }
+): UploadedFilePayload {
+  return {
+    name: fileName,
+    content: extracted.segments.map((s) => s.source).join('\n'),
+    isExcel: true,
+    sourceBlobId,
+    importEngine: 'okapi-java',
+    docxImportMode: extra?.docxImportMode,
+    segments: extracted.segments.map((s) => ({
+      source: s.source,
+      target: s.target || '',
+      okapiTuId: s.okapiTuId ?? s.id,
+      okapiSegmentIndex: s.okapiSegmentIndex ?? 0,
+      inlineRunMeta: s.inlineRunMeta,
+    })),
+  };
 }
 
 export type ProjectCreateFormState = {
@@ -69,9 +201,13 @@ export type ProjectCreateFormState = {
   regexDictionaryBookIds: Set<string>;
   newTmName: string;
   newTbName: string;
+  segmentationMode: TranslationSegmentationMode;
 };
 
-export async function parseProjectFile(file: File): Promise<UploadedFilePayload> {
+export async function parseProjectFile(
+  file: File,
+  opts?: ParseProjectFileOptions
+): Promise<UploadedFilePayload> {
   const xliffKind = detectXliffKind(file.name);
   if (xliffKind === 'trados-package') {
     const xliffProject = await parseTradosPackage(file);
@@ -104,17 +240,19 @@ export async function parseProjectFile(file: File): Promise<UploadedFilePayload>
     const arrayBuffer = await file.arrayBuffer();
     const sourceBlobId = newSourceBlobId();
     await saveSourceBlob(sourceBlobId, arrayBuffer);
-    const parsedDocx = await parseDocxForImport(arrayBuffer, file.name);
-    const { segments: docxSegments } = parsedDocx;
-    if (docxSegments.length > 0) {
+
+    const nameHint = isLikelyBilingualDocxFileName(file.name);
+    const bilingual = await parseBilingualDocx(arrayBuffer, { allowAlternatingParas: nameHint });
+    if (bilingual && bilingual.segments.length > 0) {
       return {
         name: file.name,
-        content: docxSegments.map((s) => s.source).join('\n'),
+        content: bilingual.segments.map((s) => s.source).join('\n'),
         isExcel: true,
         sourceBlobId,
-        docxImportMode: parsedDocx.mode,
-        docxBilingualLayout: parsedDocx.docxBilingualLayout,
-        segments: docxSegments.map((s) => ({
+        docxImportMode: 'bilingual',
+        docxBilingualLayout: bilingual.layout,
+        importEngine: 'docx-ts',
+        segments: bilingual.segments.map((s) => ({
           source: s.source,
           target: s.target,
           okapiTuId: s.okapiTuId,
@@ -122,23 +260,43 @@ export async function parseProjectFile(file: File): Promise<UploadedFilePayload>
         })),
       };
     }
-    return { name: file.name, content: '', sourceBlobId };
+
+    const extracted = await okapiExtractFile(file, undefined, {
+      sourceLang: opts?.sourceLang,
+      targetLang: opts?.targetLang,
+      segmentationMode: opts?.segmentationMode,
+    });
+    if (!extracted.ok || !extracted.segments?.length) {
+      throw new Error(buildOkapiExtractError(file.name, extracted.error));
+    }
+    const processed = processExtractedSegments(extracted.segments, opts);
+    return buildPythonDocxImportPayload(file.name, sourceBlobId, { segments: processed });
   }
   if (isOkapiCandidateFile(file.name) && !file.name.endsWith('.docx')) {
     const arrayBuffer = await file.arrayBuffer();
     const sourceBlobId = newSourceBlobId();
     await saveSourceBlob(sourceBlobId, arrayBuffer);
-    const extracted = await okapiExtractFile(file);
+    const extracted = await okapiExtractFile(file, undefined, {
+      sourceLang: opts?.sourceLang,
+      targetLang: opts?.targetLang,
+      segmentationMode: opts?.segmentationMode,
+    });
     if (extracted.ok && extracted.segments?.length) {
+      const processed = processExtractedSegments(extracted.segments, opts);
+      const lower = file.name.toLowerCase();
+      const importEngine =
+        lower.endsWith('.pptx') || lower.endsWith('.xlsx') ? ('okapi-java' as const) : undefined;
       return {
         name: file.name,
-        content: extracted.segments.map((s) => s.source).join('\n'),
+        content: processed.map((s) => s.source).join('\n'),
         isExcel: true,
         sourceBlobId,
-        segments: extracted.segments.map((s) => ({
+        importEngine,
+        segments: processed.map((s) => ({
           source: s.source,
           target: s.target || '',
           okapiTuId: s.okapiTuId ?? s.id,
+          okapiSegmentIndex: s.okapiSegmentIndex ?? 0,
           inlineRunMeta: s.inlineRunMeta,
         })),
       };
@@ -157,57 +315,24 @@ export async function parseProjectFile(file: File): Promise<UploadedFilePayload>
       };
       reader.readAsText(file);
     });
-  } else if (file.name.endsWith('.xlsx') || file.name.endsWith('.xls')) {
+  }
+  if (
+    file.name.toLowerCase().endsWith('.xlsx') ||
+    file.name.toLowerCase().endsWith('.xlsm')
+  ) {
+    return parseXlsxProjectFile(file, opts);
+  }
+  if (file.name.toLowerCase().endsWith('.xls')) {
     const arrayBuffer = await file.arrayBuffer();
-    const workbook = XLSX.read(arrayBuffer, { type: 'array' });
-    const firstSheetName = workbook.SheetNames[0];
-    const worksheet = workbook.Sheets[firstSheetName];
-    const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 }) as unknown[][];
-    const hasMultipleColumns = jsonData.length > 0 && jsonData[0] && jsonData[0].length >= 2;
-
-    if (hasMultipleColumns) {
-      const segments = jsonData
-        .map((row) => {
-          if (!row || row.length < 1) return null;
-          const firstCell = String(row[0] || '').trim().toLowerCase();
-          if (firstCell === 'source' || firstCell === '原文') {
-            const secondCell = String(row[1] || '').trim().toLowerCase();
-            if (secondCell === 'target' || secondCell === '译文') {
-              return null;
-            }
-          }
-          const source = String(row[0] || '').trim();
-          const target = row[1] ? String(row[1] || '').trim() : '';
-          if (!source) return null;
-          return { source, target };
-        })
-        .filter((item): item is { source: string; target: string } => item !== null);
-
-      return {
-        name: file.name,
-        content: segments.map((s) => s.source).join('\n'),
-        isExcel: true,
-        segments,
-      };
+    const simple = parseSimpleXlsx(arrayBuffer);
+    if (simple?.length) {
+      const sourceBlobId = newSourceBlobId();
+      await saveSourceBlob(sourceBlobId, arrayBuffer);
+      return buildSimpleXlsxImportPayload(file.name, sourceBlobId, simple);
     }
-
-    const segments = jsonData
-      .map((row) => {
-        if (!row || row.length < 1) return null;
-        const cellValue = row[0];
-        if (cellValue === undefined || cellValue === null || cellValue === '') return null;
-        const text = String(cellValue).trim();
-        if (!text) return null;
-        return { source: text, target: '' };
-      })
-      .filter((item): item is { source: string; target: string } => item !== null);
-
-    return {
-      name: file.name,
-      content: segments.map((s) => s.source).join('\n'),
-      isExcel: true,
-      segments,
-    };
+    throw new Error(
+      '无法解析该 Excel (.xls) 文件。请另存为 .xlsx 后重试，或使用 Trados SDLXLIFF 工作流。'
+    );
   }
 
   return new Promise((resolve) => {
@@ -262,11 +387,15 @@ export function createProjectFromWizard(
 
   const allTmIds = new Set<string>();
   if (finalMainTmId) allTmIds.add(finalMainTmId);
-  form.referenceTmIds.forEach((id) => allTmIds.add(id));
+  form.referenceTmIds.forEach((id) => {
+    if (id && id !== finalMainTmId) allTmIds.add(id);
+  });
 
   const allTbIds = new Set<string>();
   if (finalMainTbId) allTbIds.add(finalMainTbId);
-  form.referenceTbIds.forEach((id) => allTbIds.add(id));
+  form.referenceTbIds.forEach((id) => {
+    if (id && id !== finalMainTbId) allTbIds.add(id);
+  });
 
   let totalSegments = 0;
 
@@ -299,6 +428,7 @@ export function createProjectFromWizard(
       grammarRuleBookIds: Array.from(form.grammarRuleBookIds),
       regexDictionaryBookIds: Array.from(form.regexDictionaryBookIds),
       contextDescription: '',
+      segmentationMode: form.segmentationMode,
       tradosPackage: xp.tradosPackage,
       memoqPackage: xp.memoqPackage,
     };
@@ -337,26 +467,29 @@ export function createProjectFromWizard(
           matchType: MatchType.None,
           isLocked,
           okapiTuId: item.okapiTuId ?? `p-${index}`,
+          okapiSegmentIndex: item.okapiSegmentIndex ?? 0,
           inlineRunMeta: item.inlineRunMeta,
         };
       });
     } else {
-      segs = file.content
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter((line) => line.length > 0)
-        .map((line, index) => {
-          const text = line.trim();
-          const isLocked = shouldAutoLockSegmentAtImport(text, sourceLang);
-          return {
-            id: `s-${Date.now()}-${fileIdx}-${index}`,
-            sourceText: line,
-            targetText: isLocked ? line : '',
-            status: isLocked ? SegmentStatus.Confirmed : SegmentStatus.NotStarted,
-            matchType: MatchType.None,
-            isLocked,
-          };
-        });
+      const sources = splitPlainTextToSources(
+        file.content,
+        resolveSegmentationMode(form.segmentationMode)
+      );
+      segs = sources.map((line, index) => {
+        const text = line.trim();
+        const isLocked = shouldAutoLockSegmentAtImport(text, sourceLang);
+        return {
+          id: `s-${Date.now()}-${fileIdx}-${index}`,
+          sourceText: line,
+          targetText: isLocked ? line : '',
+          status: isLocked ? SegmentStatus.Confirmed : SegmentStatus.NotStarted,
+          matchType: MatchType.None,
+          isLocked,
+          okapiTuId: `p-${index}`,
+          okapiSegmentIndex: 0,
+        };
+      });
     }
 
     totalSegments += segs.length;
@@ -372,6 +505,7 @@ export function createProjectFromWizard(
       sourceBlobId: file.sourceBlobId,
       docxImportMode: file.docxImportMode,
       docxBilingualLayout: file.docxBilingualLayout,
+      importEngine: file.importEngine,
     };
   });
 
@@ -398,6 +532,7 @@ export function createProjectFromWizard(
     grammarRuleBookIds: Array.from(form.grammarRuleBookIds),
     regexDictionaryBookIds: Array.from(form.regexDictionaryBookIds),
     contextDescription: '',
+    segmentationMode: form.segmentationMode,
   };
 
   onCreateProject(newProject, newTM, newTB);
@@ -427,13 +562,16 @@ export function getEffectiveLanguages(
   return { sourceLang: form.sourceLang, targetLang: form.targetLang };
 }
 
-export function countFileSegments(file: UploadedFilePayload): number | null {
+export function countFileSegments(
+  file: UploadedFilePayload,
+  segmentationMode?: TranslationSegmentationMode
+): number | null {
   if (file.isXliff && file.xliffProject) {
     return file.xliffProject.files.reduce((n, f) => n + f.segments.length, 0);
   }
   if (file.isExcel && file.segments) return file.segments.length;
   if (file.content) {
-    return file.content.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0).length;
+    return splitPlainTextToSources(file.content, resolveSegmentationMode(segmentationMode)).length;
   }
   return null;
 }

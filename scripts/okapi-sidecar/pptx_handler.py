@@ -792,3 +792,39 @@ def merge_pptx(
     out = io.BytesIO()
     prs.save(out)
     return out.getvalue()
+
+
+def scale_pptx_fonts(data: bytes, scale: Optional[float]) -> bytes:
+    """Scale font sizes on exportable paragraphs without changing text (post-Java-merge)."""
+    normalized = normalize_pptx_font_scale(scale)
+    if normalized is None or abs(normalized - 1.0) < 1e-9:
+        return data
+
+    prs = Presentation(io.BytesIO(data))
+    changed = False
+
+    for paragraph in iter_pptx_paragraphs(prs):
+        if not paragraph_is_exportable(paragraph):
+            continue
+        p_xml = paragraph_xml(paragraph)
+        tx_xml = _tx_body_xml(paragraph)
+        run_sz_hints = _paragraph_run_sz_hints(paragraph)
+        lst_sz = _lst_style_sz_from_tx_body(tx_xml, _paragraph_level(p_xml))
+        fallback_sz = next((h for h in run_sz_hints if h is not None), None) or lst_sz
+
+        new_xml = apply_font_scale_to_drawingml_paragraph(
+            p_xml,
+            normalized,
+            fallback_sz=fallback_sz,
+            run_sz_hints=run_sz_hints,
+        )
+        if new_xml != p_xml:
+            replace_paragraph_element(paragraph, new_xml)
+            changed = True
+
+    if not changed:
+        return data
+
+    out = io.BytesIO()
+    prs.save(out)
+    return out.getvalue()
